@@ -1,0 +1,963 @@
+diff -ruN a/sdk/harness/null_backend.cpp b/sdk/harness/null_backend.cpp
+--- a/sdk/harness/null_backend.cpp	2026-11-10 01:22:43.113466215 -0300
++++ b/sdk/harness/null_backend.cpp	2026-11-08 20:58:13.000000000 -0300
+@@ -319,7 +319,9 @@
+             // the vertex buffer's Data at +4 is a physical address
+             uint32_t data = mem::VirtualFromPhysical(kernel::R32(s.streams[0].vb + 4)) + start * s.streams[0].stride;
+             // the first vertex, or every one of a draw of four or fewer (a quad's corners)
+-            for (uint32_t k = 0; k < (count <= 4 ? count : 1); k++) {
++            // CAP_VERTS=N: every vertex of draws of up to N
++            static const uint32_t limit = std::getenv("CAP_VERTS") ? uint32_t(std::atoi(std::getenv("CAP_VERTS"))) : 4u;
++            for (uint32_t k = 0; k < (count <= limit ? count : 1); k++) {
+                 std::fprintf(f, "  v%u stride %u:", k, s.streams[0].stride);
+                 for (uint32_t i = 0; i < s.streams[0].stride / 4 && i < 10; i++) {
+                     uint32_t v = kernel::R32(data + k * s.streams[0].stride + i * 4);
+diff -ruN a/sdk/harness/reference_renderer.cpp b/sdk/harness/reference_renderer.cpp
+--- a/sdk/harness/reference_renderer.cpp	2026-11-10 01:22:43.113646115 -0300
++++ b/sdk/harness/reference_renderer.cpp	2026-11-10 01:14:43.608401353 -0300
+@@ -508,6 +508,7 @@
+ 
+ struct Fragment {
+     Vec v0, v1, fog;  // fog: colour, amount in w
++    bool fog_on = true;  // fog off: the default final combiner and the fixed function stages leave it out
+     Vec tc[4];
+ };
+ 
+@@ -804,7 +805,7 @@
+                  q[2][1], q[2][2], q[2][3], q[3][0], q[3][1], q[3][2], q[3][3]);
+         }
+         if (!k.final_abcd && !k.final_efg) {
+-            for (int i = 0; i < 3; i++) out[i] = f.fog[i] * (1 - f.fog[3]) + r0[i] * f.fog[3];
++            for (int i = 0; i < 3; i++) out[i] = f.fog_on ? f.fog[i] * (1 - f.fog[3]) + r0[i] * f.fog[3] : r0[i];
+             out[3] = r0[3];
+             return true;
+         }
+@@ -912,7 +913,7 @@
+         (st[8] == 5 ? tmp : cur) = r;
+     }
+     for (int j = 0; j < 3; j++) cur[j] = Sat(cur[j] + f.v1[j]);
+-    for (int j = 0; j < 3; j++) out[j] = f.fog[j] * (1 - f.fog[3]) + cur[j] * f.fog[3];
++    for (int j = 0; j < 3; j++) out[j] = f.fog_on ? f.fog[j] * (1 - f.fog[3]) + cur[j] * f.fog[3] : cur[j];
+     out[3] = cur[3];
+     return true;
+ }
+@@ -1123,6 +1124,20 @@
+ void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+     DumpScreenTextures(s);
+     uint32_t draw = g_draws++;
++    // SKIP_DRAWS=a,b,...: those draws of every frame are left out (diagnostics)
++    static const std::vector<uint32_t> skip = [] {
++        std::vector<uint32_t> v;
++        const char* e = std::getenv("SKIP_DRAWS");
++        int n;
++        uint32_t k;
++        while (e && std::sscanf(e, " %u%n", &k, &n) == 1) {
++            v.push_back(k);
++            e += n;
++            if (*e == ',') e++;
++        }
++        return v;
++    }();
++    if (std::find(skip.begin(), skip.end(), draw) != skip.end()) return;
+     Assembled as;
+     if (!Assemble(s, prim, start, count, indices, as) || as.topology != Topology::Triangles) return;
+     Plane rt = OpenPlane(s.rt);
+@@ -1184,7 +1199,10 @@
+             o.attr[kD1] = vp.out[4];
+             o.attr[kB0] = vp.out[7];
+             o.attr[kB1] = vp.out[8];
+-            o.attr[kFog] = Splat(FogAmount(s, vp.out[5][0]));
++            // a program's oFog is the fog factor itself when no table mode is set, as the GPU renderers take it
++            // (FillFogConstants); TimeSplitters: Future Perfect's final combiners read it
++            // and with fog off it still reaches a title's final combiner (the default one leaves fog out, below)
++            o.attr[kFog] = Splat(!s.rs[kRsFogEnable] || !s.rs[kRsFogTableMode] ? vp.out[5][0] : FogAmount(s, vp.out[5][0]));
+             for (int t = 0; t < 4; t++) o.attr[kT0 + t] = vp.out[9 + t];
+         } else {
+             const Vec& q = vp.in[0];
+@@ -1324,6 +1342,7 @@
+                     frag.v1 = attr[back ? kB1 : kD1];
+                     frag.fog = Unpack(s.rs[kRsFogColor]);
+                     frag.fog[3] = Sat(attr[kFog][0]);
++                    frag.fog_on = s.rs[kRsFogEnable] != 0;
+                     for (int t = 0; t < 4; t++) frag.tc[t] = attr[kT0 + t];
+                     g_trace.on = watched && x == probes.trace.x && y == probes.trace.y;
+                     Vec col;
+@@ -1371,8 +1390,9 @@
+                                 LOGI("  v%u pos %.2f %.2f %.1f w %.3f in %.3f %.3f %.3f %.3f", vi, pos[0], pos[1], pos[2], pos[3], v0 ? v0[0] : 0,
+                                      v0 ? v0[1] : 0, v0 ? v0[2] : 0, v0 ? v0[3] : 0);
+                             }
+-                            LOGI("probe %d,%d draw %u src %.3f %.3f %.3f %.3f -> %.3f %.3f %.3f %.3f blend %u %X %X mask %X", x, y, draw, shaded[0],
+-                                 shaded[1], shaded[2], shaded[3], col[0], col[1], col[2], col[3], unsigned(blend), src_factor, dst_factor, cmask);
++                            LOGI("probe %d,%d draw %u src %.3f %.3f %.3f %.3f -> %.3f %.3f %.3f %.3f blend %u %X %X mask %X fog %u/%u vs %08X", x, y, draw, shaded[0],
++                                 shaded[1], shaded[2], shaded[3], col[0], col[1], col[2], col[3], unsigned(blend), src_factor, dst_factor, cmask,
++                                 s.rs[kRsFogEnable], s.rs[kRsFogTableMode], s.vs_handle);
+                         }
+                     rt.Store(uint32_t(x), uint32_t(y), col, cmask);
+                 }
+diff -ruN a/sdk/runtime/gpu/shaders.cpp b/sdk/runtime/gpu/shaders.cpp
+--- a/sdk/runtime/gpu/shaders.cpp	2026-11-10 01:22:43.175834526 -0300
++++ b/sdk/runtime/gpu/shaders.cpp	2026-11-10 01:14:43.607264609 -0300
+@@ -261,7 +261,10 @@
+     o.tc1 = oT1;
+     o.tc2 = oT2;
+     o.tc3 = oT3;
+-    o.fogamt = fogfactor(oFog.x);
++    // fog off under a program (fogp.w 0): the program's oFog still reaches a title's final combiner, as the
++    // console passes it (TimeSplitters: Future Perfect's combiners read it with fog off); the default final
++    // combiner and the fixed function stages leave fog out then (below)
++    o.fogamt = fogp.w == 0 ? oFog.x : fogfactor(oFog.x);
+     return o;
+ }
+ )";
+@@ -912,7 +915,7 @@
+             body += "outc.rgb = " + D + " + lerp(" + C + ", " + B + ", " + A + ");\n";
+             body += "outc.a = " + G + ";\n";
+         } else {
+-            body += "float4 outc = float4(lerp(fogin.rgb, r0.rgb, fogin.a), r0.a);\n";
++            body += "float4 outc = float4(fogp.w == 0 ? r0.rgb : lerp(fogin.rgb, r0.rgb, fogin.a), r0.a);\n";
+         }
+     } else {
+         body += "float4 cur = v0, tmp = 0;\n";
+@@ -945,7 +948,7 @@
+             body += F("{ float3 c3 = saturate(%s); float c1 = saturate(%s); %s = float4(c3, c1); }\n", rgb.c_str(), a.c_str(), dst);
+         }
+         body += "cur.rgb = saturate(cur.rgb + v1.rgb);\n";
+-        body += "float4 outc = float4(lerp(fogin.rgb, cur.rgb, fogin.a), cur.a);\n";
++        body += "float4 outc = float4(fogp.w == 0 ? cur.rgb : lerp(fogin.rgb, cur.rgb, fogin.a), cur.a);\n";
+     }
+     body += "outc.a = alphatest(outc.a);\n" + Hooks().Output() + "return outc;\n}\n";
+     s += body;
+diff -ruN a/sdk/runtime/gpu/vk.cpp b/sdk/runtime/gpu/vk.cpp
+--- a/sdk/runtime/gpu/vk.cpp	2026-11-10 01:22:43.424904355 -0300
++++ b/sdk/runtime/gpu/vk.cpp	2026-11-08 21:08:24.000000000 -0300
+@@ -15,6 +15,7 @@
+ #include <cmath>
+ #include <cstring>
+ #include <filesystem>
++#include <mutex>
+ #include <string>
+ #include <unordered_map>
+ #include <unordered_set>
+@@ -101,7 +102,15 @@
+     void SyncLate(uint32_t data) override { Sync(data, 0); }
+     void Flush() override;
+     void SetGamma(const uint8_t*) override { LOG_FIRST(1, "vulkan: SetGamma is not done yet"); }
+-    // queries, fences and busy checks: the Backend defaults (none counted, never behind) until drawing is done
++    // the XDK's visibility tests: occlusion queries, counted precisely when the card can. A test may span several
++    // renderings (a query lives inside one) and command buffers: each rendering it is open in adds one query entry,
++    // and its count is the entries' sum. Counts are read on the drawing thread once the GPU is done with a frame
++    // slot (Cmd(), Submit(true)), so they are a frame or two old, as on the console; QueryResult only reads them.
++    void BeginQuery() override;
++    void EndQuery(uint32_t index) override;
++    bool QueryResult(uint32_t index, uint32_t& pixels) override;
++    bool Queries() const override { return !query_failed_; }
++    // fences and busy checks: the Backend defaults (never behind)
+ 
+ private:
+     bool Fail(const std::string& why) {
+@@ -300,6 +309,39 @@
+     bool anisotropy_ = false;  // the card's samplerAnisotropy, asked for at device creation
+     bool fill_lines_ = false;  // fillModeNonSolid: wireframe
+     Image dummy_[4];           // 2D, cube, 3D, depth
++
++    // visibility tests (BeginQuery above)
++    static constexpr uint32_t kQueriesPerSlot = 1024;  // entries each frame slot's command buffer may begin
++    struct QuerySeg {
++        uint32_t test, entry;
++        float ratio;  // the title's pixels per pixel counted, for the target it counted on
++    };
++    struct QueryTest {
++        uint32_t index = ~0u;  // the title's name for it, given at the end (~0: ended unnamed, dropped)
++        uint32_t open = 0;     // its entries not yet read
++        double pixels = 0;
++        bool ended = false;
++    };
++    bool EnsureQueries();
++    void StartQuerySegment();  // the open test counts in the rendering just begun
++    void StopQuerySegment();   // ... until it ends
++    void ReadQueries(uint32_t slot);
++    void PublishQuery(const QueryTest& t);
++    VkQueryPool query_pool_ = VK_NULL_HANDLE;
++    bool query_precise_ = false;  // occlusionQueryPrecise: exact counts, not just "some"
++    bool query_failed_ = false;
++    std::vector<QuerySeg> query_segs_[kFrames];  // begun in that slot's command buffer, not yet read
++    uint32_t query_used_[kFrames] = {};
++    std::unordered_map<uint32_t, QueryTest> query_tests_;  // by id, until every entry is read
++    uint32_t query_open_ = 0;  // the test begun and not yet ended (id), 0 none
++    uint32_t query_ids_ = 0;
++    int64_t query_entry_ = -1;  // the entry counting in the open rendering
++    struct QueryCount {
++        uint32_t pixels = 0;
++        bool have = false;
++    };
++    std::mutex query_lock_;  // QueryResult may run on the title's thread while a render thread draws
++    std::unordered_map<uint32_t, QueryCount> query_counts_;  // by the title's index: the newest finished count
+     VkBuffer readback_ = VK_NULL_HANDLE;  // Sync's, host visible, grown as needed
+     VkDeviceMemory readback_mem_ = VK_NULL_HANDLE;
+     uint8_t* readback_cpu_ = nullptr;
+@@ -542,6 +584,8 @@
+     fill_lines_ = have.features.fillModeNonSolid;
+     on.features.samplerAnisotropy = have.features.samplerAnisotropy;
+     on.features.fillModeNonSolid = have.features.fillModeNonSolid;
++    query_precise_ = have.features.occlusionQueryPrecise;
++    on.features.occlusionQueryPrecise = have.features.occlusionQueryPrecise;
+     ubo_align_ = std::max<VkDeviceSize>(p.limits.minUniformBufferOffsetAlignment, 16);
+ 
+     std::vector<const char*> names = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+@@ -752,6 +796,8 @@
+         for (auto& [key, pt] : pack_cache_) DestroyImage(pt.img);
+         pack_cache_.clear();
+         for (Image& im : dummy_) DestroyImage(im);
++        if (query_pool_) vkDestroyQueryPool(device_, query_pool_, nullptr);
++        query_pool_ = VK_NULL_HANDLE;
+         DestroyImage(scratch_);
+         if (readback_) vkDestroyBuffer(device_, readback_, nullptr);
+         if (readback_mem_) vkFreeMemory(device_, readback_mem_, nullptr);
+@@ -957,6 +1003,12 @@
+     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+     vkBeginCommandBuffer(f.cmd, &bi);
+     recording_ = true;
++    // the slot's visibility counts from its last use are done: read, then its entries reset for this use
++    if (query_pool_) {
++        ReadQueries(frame_);
++        vkCmdResetQueryPool(f.cmd, query_pool_, frame_ * kQueriesPerSlot, kQueriesPerSlot);
++        query_used_[frame_] = 0;
++    }
+     return f.cmd;
+ }
+ 
+@@ -979,8 +1031,12 @@
+         LOG_FIRST(4, "vulkan: vkQueueSubmit failed (%s)", ResultName(r));
+         return;
+     }
+-    if (wait) vkWaitForFences(device_, 1, &f.done, VK_TRUE, UINT64_MAX);
+-    else frame_ = (frame_ + 1) % kFrames;
++    if (wait) {
++        vkWaitForFences(device_, 1, &f.done, VK_TRUE, UINT64_MAX);
++        if (query_pool_) ReadQueries(frame_);
++    } else {
++        frame_ = (frame_ + 1) % kFrames;
++    }
+ }
+ 
+ void VkBackend::Flush() { Submit(true); }
+@@ -1044,11 +1100,13 @@
+     if (ds) ds->drawn = true;
+     render_rt_ = rt;
+     render_ds_ = ds;
++    if (query_open_) StartQuerySegment();
+     return true;
+ }
+ 
+ void VkBackend::EndRendering() {
+     if (!rendering_) return;
++    StopQuerySegment();
+     vkCmdEndRenderingKHR(frames_[frame_].cmd);
+     rendering_ = false;
+     render_rt_ = render_ds_ = nullptr;
+@@ -2723,6 +2781,116 @@
+     }
+ }
+ 
++// visibility tests
++
++bool VkBackend::EnsureQueries() {
++    if (query_pool_) return true;
++    if (query_failed_ || !device_ || !vkCreateQueryPool || !vkGetQueryPoolResults || !vkCmdResetQueryPool) {
++        query_failed_ = true;
++        return false;
++    }
++    VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
++    qi.queryType = VK_QUERY_TYPE_OCCLUSION;
++    qi.queryCount = kQueriesPerSlot * kFrames;
++    VkResult r = vkCreateQueryPool(device_, &qi, nullptr, &query_pool_);
++    if (r != VK_SUCCESS) {
++        LOGE("vulkan: occlusion queries unavailable (%s), visibility tests read as fully visible", ResultName(r));
++        query_pool_ = VK_NULL_HANDLE;
++        query_failed_ = true;
++        return false;
++    }
++    LOGI("vulkan: visibility tests counted by occlusion queries%s", query_precise_ ? "" : " (not precise on this card)");
++    // the open command buffer's entries are reset now; the other slots' when their next one begins
++    if (recording_) {
++        bool was = rendering_;
++        Target *rt = render_rt_, *ds = render_ds_;
++        EndRendering();
++        vkCmdResetQueryPool(frames_[frame_].cmd, query_pool_, frame_ * kQueriesPerSlot, kQueriesPerSlot);
++        query_used_[frame_] = 0;
++        if (was) BeginRendering(rt, ds);
++    }
++    return true;
++}
++
++void VkBackend::StartQuerySegment() {
++    if (!query_pool_ || !query_open_ || query_entry_ >= 0 || !rendering_ || !recording_) return;
++    if (query_used_[frame_] >= kQueriesPerSlot) {
++        LOG_FIRST(2, "vulkan: more than %u visibility test renderings in a frame: the rest are not counted", kQueriesPerSlot);
++        return;
++    }
++    uint32_t entry = frame_ * kQueriesPerSlot + query_used_[frame_]++;
++    vkCmdBeginQuery(frames_[frame_].cmd, query_pool_, entry, query_precise_ ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
++    query_entry_ = entry;
++    // counted at our resolution on the target drawn to, given back in the title's pixels
++    const Target* t = render_ds_ ? render_ds_ : render_rt_;
++    float ratio = t && t->w && t->h ? float(t->gw) * float(t->gh) / (float(t->w) * float(t->h)) : 1.0f;
++    query_segs_[frame_].push_back({query_open_, entry, ratio});
++    query_tests_[query_open_].open++;
++}
++
++void VkBackend::StopQuerySegment() {
++    if (query_entry_ < 0) return;
++    vkCmdEndQuery(frames_[frame_].cmd, query_pool_, uint32_t(query_entry_));
++    query_entry_ = -1;
++}
++
++void VkBackend::PublishQuery(const QueryTest& t) {
++    if (t.index == ~0u) return;
++    std::lock_guard<std::mutex> lock(query_lock_);
++    QueryCount& c = query_counts_[t.index];
++    c.pixels = uint32_t(std::min(std::round(t.pixels), 4294967295.0));
++    c.have = true;
++}
++
++// the slot's GPU work is done: its entries' counts go to their tests, and a test with all its counts in is finished
++void VkBackend::ReadQueries(uint32_t slot) {
++    for (const QuerySeg& seg : query_segs_[slot]) {
++        uint64_t n = 0;
++        VkResult r = vkGetQueryPoolResults(device_, query_pool_, seg.entry, 1, sizeof(n), &n, sizeof(n), VK_QUERY_RESULT_64_BIT);
++        if (r != VK_SUCCESS) n = 0;
++        auto it = query_tests_.find(seg.test);
++        if (it == query_tests_.end()) continue;
++        QueryTest& t = it->second;
++        t.pixels += double(n) * seg.ratio;
++        if (t.open) t.open--;
++        if (!t.open && t.ended) {
++            PublishQuery(t);
++            query_tests_.erase(it);
++        }
++    }
++    query_segs_[slot].clear();
++}
++
++void VkBackend::BeginQuery() {
++    if (!EnsureQueries()) return;
++    if (query_open_) EndQuery(~0u);  // one left open: ended unnamed
++    query_open_ = ++query_ids_ ? query_ids_ : ++query_ids_;
++    query_tests_[query_open_] = QueryTest{};
++    StartQuerySegment();
++}
++
++void VkBackend::EndQuery(uint32_t index) {
++    if (!query_open_) return;
++    StopQuerySegment();
++    auto it = query_tests_.find(query_open_);
++    query_open_ = 0;
++    if (it == query_tests_.end()) return;
++    it->second.index = index;
++    it->second.ended = true;
++    if (!it->second.open) {  // nothing drawn, or every count already in
++        PublishQuery(it->second);
++        query_tests_.erase(it);
++    }
++}
++
++bool VkBackend::QueryResult(uint32_t index, uint32_t& pixels) {
++    std::lock_guard<std::mutex> lock(query_lock_);
++    auto it = query_counts_.find(index);
++    if (it == query_counts_.end() || !it->second.have) return false;
++    pixels = it->second.pixels;
++    return true;
++}
++
+ void VkBackend::Present(const Surface& front) {
+     if (lost_ || !device_) return;
+     {
+diff -ruN a/sdk/runtime/gpu/vk_loader.h b/sdk/runtime/gpu/vk_loader.h
+--- a/sdk/runtime/gpu/vk_loader.h	2026-11-10 01:22:43.425257836 -0300
++++ b/sdk/runtime/gpu/vk_loader.h	2026-11-08 21:08:24.000000000 -0300
+@@ -57,7 +57,7 @@
+     X(vkCmdClearAttachments) X(vkCmdResolveImage) X(vkCmdPipelineBarrier) X(vkCmdBeginQuery) X(vkCmdEndQuery)           \
+     X(vkCmdResetQueryPool) X(vkCmdCopyQueryPoolResults) X(vkCmdPushConstants) X(vkCmdBeginRenderPass)                   \
+     X(vkCmdEndRenderPass) X(vkCreateRenderPass) X(vkDestroyRenderPass) X(vkCreateFramebuffer) X(vkDestroyFramebuffer) \
+-    X(vkCmdBeginRenderingKHR) X(vkCmdEndRenderingKHR)
++    X(vkCmdBeginRenderingKHR) X(vkCmdEndRenderingKHR) X(vkGetQueryPoolResults)
+ 
+ #define GPU_VK_DECLARE(name) extern PFN_##name name;
+ GPU_VK_GLOBAL(GPU_VK_DECLARE)
+diff -ruN a/sdk/runtime/xdk/d3d8.cpp b/sdk/runtime/xdk/d3d8.cpp
+--- a/sdk/runtime/xdk/d3d8.cpp	2026-11-10 01:22:43.409724643 -0300
++++ b/sdk/runtime/xdk/d3d8.cpp	2026-11-10 01:27:59.193383965 -0300
+@@ -72,6 +72,14 @@
+ #define SYM_D3DDevice_EndPush FFFFFE01
+ #define HAS_D3DDevice_EndPush 0
+ #endif
++#ifndef SYM_D3DDevice_UpdateOverlay
++#define SYM_D3DDevice_UpdateOverlay FFFFFE60
++#define HAS_D3DDevice_UpdateOverlay 0
++#endif
++#ifndef SYM_D3DDevice_GetOverlayUpdateStatus
++#define SYM_D3DDevice_GetOverlayUpdateStatus FFFFFE61
++#define HAS_D3DDevice_GetOverlayUpdateStatus 0
++#endif
+ // The Third Age (LTCG): its inlined library code reads the current vertex shader object at a device field
+ // (D3D_DeviceVertexShaderField, +0x794) that the console's CreateDevice points at a default shader
+ // (D3D_DefaultVertexShader, 0x2397F0). The host's CreateDevice clears the device, so it sets the same pointer.
+@@ -195,6 +203,13 @@
+ 
+ void Walk(uint32_t end);
+ 
++// Vertex arrays the title pushed itself between BeginPush and EndPush: array formats (0x1760, 16 registers: type in
++// bits 0 to 3, count in 4 to 7, stride from bit 8) and their addresses (0x1720, physical), each register its own
++// array. TimeSplitters: Future Perfect pushes them after SelectVertexShaderDirect for its models (0x1EB00), right
++// after the library flushed its own (BeginPush calls SetStateVB first), so they hold until the library sets
++// inputs again: SetStreamSource, SetVertexShader, a selection or a draw from user memory.
++bool g_pushed_arrays = false;
++
+ // Hardware commands a caller still pushes go to a scratch buffer, rewound at every request once Walk has read it
+ uint32_t ScratchPush(uint32_t bytes = 0) {
+     Walk(Dev(kDevPush));
+@@ -426,8 +441,8 @@
+     uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24), interval = R32(pp + 0x30);
+     if (!w) w = 640;
+     if (!h) h = 480;
+-    LOGI("d3d: CreateDevice %ux%u format %X buffers %u depth %u format %X interval %X flags %X", w, h, fmt, count,
+-         auto_depth, depth_fmt, interval, R32(pp + 0x28));
++    LOGI("d3d: CreateDevice %ux%u format %X buffers %u depth %u format %X interval %X flags %X multisample %X swap %u",
++         w, h, fmt, count, auto_depth, depth_fmt, interval, R32(pp + 0x28), R32(pp + 0x10), R32(pp + 0x14));
+     // XBE_VULKAN_PROBE: what this PC's Vulkan offers, in the log (the Vulkan backend is being written)
+     if (std::getenv("XBE_VULKAN_PROBE")) gpu::vk::Probe();
+     std::memset(HostPtr(kDevice), 0, XDK_CDevice_Size);
+@@ -489,6 +504,10 @@
+                                          L"game needs. Updating the graphics driver may help; the log has the details.");
+         if (RenderThread()) g_backend = gpu::CreateThreadedBackend(std::move(g_backend));
+     }
++    // as the XDK's CreateDevice (XDK 5849, TimeSplitters: Future Perfect 0x3DA78C): multisampling or the COPY swap
++    // effect puts the device in its copy mode, flag 0x4000, which decides the flags that flip at Swap
++    if (XDK_CDevice_Flags != xdk::kUnknown && ((R32(pp + 0x10) & 0x3000) || R32(pp + 0x14) == 3))
++        SetDev(XDK_CDevice_Flags, Dev(XDK_CDevice_Flags) | 0x4000);
+     g_state = gpu::State{};
+     g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
+     g_screen_pixels = w * h;
+@@ -628,7 +647,94 @@
+ }
+ HLE_STDCALL(D3DDevice_SetFlickerFilter, 1) { return 0; }
+ HLE_STDCALL(D3DDevice_SetSoftDisplayFilter, 1) { return 0; }
+-HLE_STDCALL(D3DDevice_EnableOverlay, 1) { return 0; }
++// The video overlay: the console's scaler shows a surface over the picture, through registers the host has none of
++// (TimeSplitters: Future Perfect's XMV player shows each decoded frame this way, a YUY2 surface). Here the frame is
++// drawn into the back buffer at each flip while the overlay is on (DrawOverlay, at Swap).
++namespace {
++struct Overlay {
++    bool on = false;
++    uint32_t surface = 0;
++    int32_t src[4] = {}, dst[4] = {};  // left, top, right, bottom; right 0: the whole surface or screen
++} g_overlay;
++}  // namespace
++HLE_STDCALL(D3DDevice_EnableOverlay, 1) {
++    DeviceLock lock;
++    g_overlay.on = a[0] != 0;
++    if (!g_overlay.on) g_overlay.surface = 0;
++    return 0;
++}
++// (surface, src rect, dst rect, colour key on, colour key)
++HLE_STDCALL(D3DDevice_UpdateOverlay, 5) {
++    DeviceLock lock;
++    LOG_FIRST(2, "d3d: UpdateOverlay surface %08X src %08X dst %08X key %u %08X", a[0], a[1], a[2], a[3], a[4]);
++    g_overlay.surface = a[0];
++    g_overlay.on = a[0] != 0;
++    for (int i = 0; i < 4; i++) {
++        g_overlay.src[i] = a[1] ? int32_t(R32(a[1] + i * 4)) : 0;
++        g_overlay.dst[i] = a[2] ? int32_t(R32(a[2] + i * 4)) : 0;
++    }
++    return 0;
++}
++// TRUE once the frame given to UpdateOverlay is on screen: at once here
++HLE_STDCALL(D3DDevice_GetOverlayUpdateStatus, 0) { return 1; }
++
++namespace {
++// the overlay's frame into the back buffer: converted (YUY2 or UYVY, BT.601 studio range) and scaled into a surface
++// of the back buffer's size and format, then copied over it as a CopyRects would, which the renderers take from
++// memory
++void DrawOverlay(uint32_t back) {
++    uint32_t s = g_overlay.surface;
++    if (!s || !back || !g_backend) return;
++    uint32_t sfmt = (R32(s + 12) >> 8) & 0xFF, bfmt = (R32(back + 12) >> 8) & 0xFF;
++    if (sfmt != 0x24 && sfmt != 0x25) {
++        LOG_FIRST(2, "d3d: overlay surface format %X not drawn", sfmt);
++        return;
++    }
++    auto dims = [](uint32_t size, uint32_t& w, uint32_t& h, uint32_t& pitch) {
++        w = (size & 0xFFF) + 1;
++        h = ((size >> 12) & 0xFFF) + 1;
++        pitch = ((size >> 24) + 1) * 64;
++    };
++    uint32_t sw, sh, sp, bw, bh, bp;
++    dims(R32(s + 16), sw, sh, sp);
++    dims(R32(back + 16), bw, bh, bp);
++    static uint32_t frame = 0, fw = 0, fh = 0, ff = 0;  // the scratch surface, remade when the back buffer changes
++    if (!frame || fw != bw || fh != bh || ff != bfmt) {
++        frame = NewSurface(bw, bh, bfmt, 4);
++        fw = bw, fh = bh, ff = bfmt;
++    }
++    uint32_t fp = ((R32(frame + 16) >> 24) + 1) * 64;
++    const uint8_t* src = static_cast<const uint8_t*>(HostPtr(mem::VirtualFromPhysical(R32(s + 4))));
++    uint8_t* out = static_cast<uint8_t*>(HostPtr(mem::VirtualFromPhysical(R32(frame + 4))));
++    int32_t sl = g_overlay.src[0], st = g_overlay.src[1], sr = g_overlay.src[2], sb = g_overlay.src[3];
++    int32_t dl = g_overlay.dst[0], dt = g_overlay.dst[1], dr = g_overlay.dst[2], db = g_overlay.dst[3];
++    if (sr <= sl || sb <= st) sl = 0, st = 0, sr = int32_t(sw), sb = int32_t(sh);
++    if (dr <= dl || db <= dt) dl = 0, dt = 0, dr = int32_t(bw), db = int32_t(bh);
++    // a 4:3 film over the whole of a widescreen (anamorphic) picture: kept 4:3, with bars at the sides
++    if (app::Widescreen() && dl == 0 && dr == int32_t(bw)) dl = int32_t(bw / 8), dr = int32_t(bw - bw / 8);
++    bool yuy2 = sfmt == 0x24;
++    auto clamp255 = [](int v) { return uint8_t(v < 0 ? 0 : v > 255 ? 255 : v); };
++    for (uint32_t y = 0; y < bh; y++) {
++        uint32_t* row = reinterpret_cast<uint32_t*>(out + size_t(y) * fp);
++        for (uint32_t x = 0; x < bw; x++) {
++            if (int32_t(x) < dl || int32_t(x) >= dr || int32_t(y) < dt || int32_t(y) >= db) {
++                row[x] = 0xFF000000u;
++                continue;
++            }
++            uint32_t sx = uint32_t(std::clamp<int64_t>(sl + int64_t(int32_t(x) - dl) * (sr - sl) / (dr - dl), 0, sw - 1));
++            uint32_t sy = uint32_t(std::clamp<int64_t>(st + int64_t(int32_t(y) - dt) * (sb - st) / (db - dt), 0, sh - 1));
++            const uint8_t* p = src + size_t(sy) * sp + (sx & ~1u) * 2;
++            int luma = (yuy2 ? p[(sx & 1) * 2] : p[(sx & 1) * 2 + 1]) - 16, u = (yuy2 ? p[1] : p[0]) - 128,
++                v = (yuy2 ? p[3] : p[2]) - 128;
++            uint8_t r = clamp255((298 * luma + 409 * v + 128) >> 8), g = clamp255((298 * luma - 100 * u - 208 * v + 128) >> 8),
++                    b = clamp255((298 * luma + 516 * u + 128) >> 8);
++            row[x] = 0xFF000000u | uint32_t(r) << 16 | uint32_t(g) << 8 | b;
++        }
++    }
++    gpu::MarkDirty(frame);
++    g_backend->Copy(SurfaceOf(frame), SurfaceOf(back), 0, 0, 0);
++}
++}  // namespace
+ // the front buffer, read back at the guest size, is kept for the next instance after a quick reboot, which may
+ // fade from it at its first frames
+ HLE_STDCALL(D3DDevice_PersistDisplay, 0) {
+@@ -708,6 +814,15 @@
+ }  // namespace
+ 
+ HLE_STDCALL(D3DDevice_Swap, 1) {
++    // which calls flip (XDK 5849's Swap, 0x3D8E50 in TimeSplitters: Future Perfect): flags 0 are COPY | FINISH (5);
++    // with the device's flag 0x4000 COPY or BYPASSCOPY (3) flips and FINISH (4) only finishes, without it FINISH
++    // flips and COPY or BYPASSCOPY alone does nothing. Future Perfect calls Swap(BYPASSCOPY) then Swap(FINISH) each
++    // frame: one flip, not two (the second showed the frame before)
++    {
++        uint32_t flags = a[0] ? a[0] : 5;
++        bool mode = XDK_CDevice_Flags != 0xFFFFFFFFu && (Dev(XDK_CDevice_Flags) & 0x4000);
++        if (!(mode ? flags & 3 : flags & 4)) return Dev(kDevSwapCount);
++    }
+     kernel::Blocking told;  // the game told on its own thread, before and after (kernel::g_blocking)
+     app::SplashFirstFrame();
+     // handed over from the previous instance: the window opens on the second frame, the first picture with
+@@ -732,6 +847,7 @@
+         }
+     }
+     kernel::MarkFrameThread();
++    if (g_overlay.on) DrawOverlay(g_buffers[1]);  // the video overlay's frame over the picture
+     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
+     app::Pace();
+     // the in-game menu or a pause in the background: the game waits here, its last picture shown again with the
+@@ -981,6 +1097,7 @@
+ HLE_STDCALL(D3DDevice_SetStreamSource, 3) {
+     if (core::t_draw_thread) --core::g_state_gen;  // draw data or a query: not a change of draw state
+     DeviceLock lock;
++    g_pushed_arrays = false;
+     uint32_t n = a[0] & 15, vb = a[1], stride = a[2];
+     uint32_t old = R32(kStreams + n * kStreamSize + XDK_Stream_Buffer);
+     AddRef(ctx, vb);
+@@ -1065,6 +1182,7 @@
+ 
+ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
+     DeviceLock lock;
++    g_pushed_arrays = false;
+     uint32_t h = a[0];
+     g_state.vs_handle = h;
+     g_state.vs = nullptr;
+@@ -1117,6 +1235,7 @@
+ namespace {
+ 
+ void SelectVertexShader(uint32_t h, uint32_t address) {
++    g_pushed_arrays = false;
+     std::shared_ptr<gpu::VertexShader> decl;
+     if (h & 1) {
+         auto it = g_vs.find(h);
+@@ -1179,6 +1298,61 @@
+     SelectVertexShader(a[0], a[1]);
+     return 0;
+ }
++
++// LoadVertexShaderProgram(function, address): a program the title keeps itself (a header dword, type in the low and
++// instruction count in the high half, then 4 dwords an instruction), into vertex program memory as LoadVertexShader
++// puts a shader's. TimeSplitters 2 (XDK 4721) loads all its programs this way.
++HLE_STDCALL(D3DDevice_LoadVertexShaderProgram, 2) {
++    DeviceLock lock;
++    uint32_t func = a[0], address = a[1];
++    if (!func) return 0;
++    uint32_t hdr = R32(func), n = hdr >> 16;
++    std::vector<uint32_t> program(size_t(n) * 4);
++    for (uint32_t i = 0; i < n * 4; i++) program[i] = R32(func + 4 + i * 4);
++    for (auto m = g_vs_memory.begin(); m != g_vs_memory.end();)
++        m = m->first < address + n && address < m->first + m->second.program.size() / 4 ? g_vs_memory.erase(m) : std::next(m);
++    g_vs_memory[address] = {std::move(program), hdr & 0xFFFF};
++    for (auto sel = g_vs_selected.begin(); sel != g_vs_selected.end();)
++        sel = sel->first.second >= address && sel->first.second < address + n ? g_vs_selected.erase(sel) : std::next(sel);
++    LOG_FIRST(16, "d3d: LoadVertexShaderProgram %08X at %u, %u instructions", func, address, n);
++    return 0;
++}
++
++// SelectVertexShaderDirect(attributes, address): draws with the program at the address and inputs given as a
++// D3DVERTEXATTRIBUTEFORMAT (16 registers of {stream, offset, format, tessellation}, 16 bytes each) rather than a
++// declaration; none keeps the current inputs. Each distinct format becomes one declaration of the host's.
++HLE_STDCALL(D3DDevice_SelectVertexShaderDirect, 2) {
++    DeviceLock lock;
++    uint32_t vaf = a[0], address = a[1];
++    if (!vaf) {
++        SelectVertexShader(0, address);
++        return 0;
++    }
++    uint64_t key = 0xCBF29CE484222325ull;
++    for (uint32_t i = 0; i < 64; i++) key = (key ^ R32(vaf + i * 4)) * 0x100000001B3ull;
++    static std::unordered_map<uint64_t, uint32_t> handles;
++    uint32_t& h = handles[key];
++    if (!h || !g_vs.count(h)) {
++        auto vs = std::make_shared<gpu::VertexShader>();
++        auto size = [](uint32_t t) -> uint32_t {
++            if (t == 0x16) return 4;  // NORMPACKED3
++            uint32_t n = t >> 4, kind = t & 15;
++            return n * (kind == 2 ? 4 : kind == 4 ? 1 : 2);
++        };
++        for (uint32_t r = 0; r < 16; r++) {
++            uint32_t stream = R32(vaf + r * 16) & 15, offset = R32(vaf + r * 16 + 4), type = R32(vaf + r * 16 + 8) & 0xFF;
++            if (type == 0x02 || !type) continue;  // D3DVSDT_NONE
++            vs->inputs[r] = {int(stream), offset, type};
++            vs->stream_stride[stream] = std::max(vs->stream_stride[stream], offset + size(type));
++        }
++        vs->handle = mem::AllocSystem(16, 16) | 1;
++        g_vs[vs->handle] = vs;
++        h = vs->handle;
++        LOG_FIRST(32, "d3d: SelectVertexShaderDirect: attribute format %08X is declaration %08X", vaf, h);
++    }
++    SelectVertexShader(h, address);
++    return 0;
++}
+ HLE_STDCALL(D3DDevice_SetShaderConstantMode, 1) {
+     DeviceLock lock;
+     g_own_constants = a[0] & 0x10;  // D3DSCM_NORESERVEDCONSTANTS
+@@ -1186,6 +1360,8 @@
+     return 0;
+ }
+ 
++static void LoadPixelShaderState();  // the bound pixel shader's combiner state, below
++
+ HLE_STDCALL(D3DDevice_CreatePixelShader, 2) {
+     DeviceLock lock;
+     auto ps = std::make_shared<gpu::PixelShader>();
+@@ -1225,7 +1401,33 @@
+         LOG_FIRST(8, "d3d: SetPixelShader with unknown handle %08X", a[0]);
+         return 0;
+     }
+-    // the definition loads the combiner state like the XDK pushes it
++    LoadPixelShaderState();
++    return 0;
++}
++
++// SetPixelShaderProgram(definition): a D3DPIXELSHADERDEF the title keeps itself, used as SetPixelShader uses a
++// shader's; one host shader per distinct definition
++HLE_STDCALL(D3DDevice_SetPixelShaderProgram, 1) {
++    DeviceLock lock;
++    g_state.ps = nullptr;
++    if (!a[0]) return 0;
++    const void* def = HostPtr(a[0]);
++    uint64_t key = 0xCBF29CE484222325ull;
++    for (size_t i = 0; i < sizeof(gpu::PixelShader::def); i++) key = (key ^ static_cast<const uint8_t*>(def)[i]) * 0x100000001B3ull;
++    static std::unordered_map<uint64_t, std::shared_ptr<gpu::PixelShader>> made;
++    auto& ps = made[key];
++    if (!ps) {
++        ps = std::make_shared<gpu::PixelShader>();
++        ps->handle = a[0];
++        std::memcpy(ps->def, def, sizeof(ps->def));
++    }
++    g_state.ps = ps;
++    LoadPixelShaderState();
++    return 0;
++}
++
++// the definition loads the combiner state like the XDK pushes it
++static void LoadPixelShaderState() {
+     const uint32_t* d = g_state.ps->def;
+     auto put = [&](uint32_t method, uint32_t v) { g_state.simple[method >> 2] = v; };
+     for (int i = 0; i < 8; i++) {
+@@ -1245,7 +1447,6 @@
+     put(gpu::kMPsDotMapping, d[55]);
+     put(gpu::kMPsInputTexture, d[56]);
+     SetComplex(gpu::kRsPsTextureModes, d[54]);
+-    return 0;
+ }
+ 
+ HLE_STDCALL(D3DDevice_SetPixelShaderConstant, 3) {
+@@ -1282,7 +1483,8 @@
+         // a backend without queries: everything visible, as before tests were counted
+         done = g_backend && g_backend->QueryResult(a[0], pixels);
+         if (!g_backend || !g_backend->Queries()) {
+-            pixels = g_screen_pixels;
++            static const char* vis = std::getenv("VIS_PIXELS");  // (diagnostics) what such a test counts instead
++            pixels = vis ? uint32_t(std::atoi(vis)) : g_screen_pixels;
+             done = true;
+         }
+     }
+@@ -1297,8 +1499,57 @@
+ // every draw goes to the backend through here: whether the state is the draw before's (gpu::g_draw_same_state, for
+ // D3D12's repeat path), on this thread; the threaded renderer works that out itself
+ uint64_t g_last_draw_gen = ~0ull;
++// the pushed arrays as the draw's inputs: register r reads stream r, a vertex buffer header pointing at its array
++// with its stride; the bound program stays. Headers and declarations are kept, one a register and one a set of
++// formats for each program.
++void UsePushedArrays() {
++    static uint32_t headers[16] = {};
++    static std::map<std::pair<const gpu::VertexShader*, uint64_t>, std::shared_ptr<gpu::VertexShader>> made;
++    uint64_t key = 0xCBF29CE484222325ull;
++    for (uint32_t r = 0; r < 16; r++) key = (key ^ (g_state.simple[(0x1760 >> 2) + r] & 0xFF)) * 0x100000001B3ull;
++    auto& vs = made[{g_state.vs.get(), key}];
++    if (!vs) {
++        vs = std::make_shared<gpu::VertexShader>(*g_state.vs);
++        vs->hash = 0;
++        vs->stream_stride = {};
++        for (uint32_t r = 0; r < 16; r++) {
++            uint32_t type = g_state.simple[(0x1760 >> 2) + r] & 0xFF;
++            if (!(type >> 4)) {  // no components: off
++                vs->inputs[r] = {};
++                continue;
++            }
++            uint32_t n = type >> 4, kind = type & 15;
++            vs->inputs[r] = {int(r), 0, type};
++            vs->stream_stride[r] = type == 0x16 ? 4 : kind == 2 ? n * 4 : kind == 1 || kind == 5 ? n * 2 : kind == 0 ? 4 : n;
++        }
++    }
++    for (uint32_t r = 0; r < 16; r++) {
++        uint32_t f = g_state.simple[(0x1760 >> 2) + r];
++        if (!(f >> 4 & 15)) continue;
++        if (!headers[r]) {
++            headers[r] = mem::AllocSystem(20);
++            std::memset(HostPtr(headers[r]), 0, 20);
++            W32(headers[r], 1);  // a vertex buffer, one reference
++        }
++        W32(headers[r] + 4, g_state.simple[(0x1720 >> 2) + r] & 0x7FFFFFFF);
++        g_state.streams[r] = {headers[r], f >> 8};
++    }
++    g_state.vs = vs;
++}
++
+ void BackendDraw(uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) {
+-    core::t_draw_thread = true;  // both ways: the threaded renderer sends only draw data while the count stands still
++    core::t_draw_thread = true;
++    if (g_pushed_arrays && g_state.vs) {
++        auto streams = g_state.streams;
++        auto bound = g_state.vs;
++        g_pushed_arrays = false;  // the draw below, as the library's own
++        UsePushedArrays();
++        BackendDraw(prim, start, count, indices);
++        g_pushed_arrays = true;
++        g_state.streams = streams;
++        g_state.vs = bound;
++        return;
++    }  // both ways: the threaded renderer sends only draw data while the count stands still
+     if (RenderThread()) {
+         g_backend->Draw(g_state, prim, start, count, indices);
+         return;
+@@ -1356,6 +1607,7 @@
+ 
+ void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride) {
+     if (!g_backend || !count || !stride) return;
++    g_pushed_arrays = false;  // the library pushes its own arrays for these
+     if (uint64_t(count) * stride > kUpHalf) {  // more than the ring holds: not drawn, rather than from stale bytes
+         LOG_FIRST(4, "d3d: DrawVerticesUP of %u bytes skipped (more than %u)", count * stride, kUpHalf);
+         return;
+@@ -1730,9 +1982,11 @@
+             } else if (m >= kArrayFormat && m < kArrayFormat + 16 * 4) {
+                 formats[(m - kArrayFormat) / 4] = v;
+                 own_formats = true;
++                g_pushed_arrays = true;
+                 if (m >> 2 < g_state.simple.size()) g_state.simple[m >> 2] = v;
+             } else if (m != kBeginEnd) {
+                 if (m >> 2 < g_state.simple.size()) g_state.simple[m >> 2] = v;
++                if (m >= 0x1720 && m < 0x1760) g_pushed_arrays = true;  // an array's address: its format came too
+             } else if (v) {
+                 prim = v;
+                 vertices.clear();
+diff -ruN a/sdk/runtime/xdk/dsound.cpp b/sdk/runtime/xdk/dsound.cpp
+--- a/sdk/runtime/xdk/dsound.cpp	2026-11-10 01:22:43.410157508 -0300
++++ b/sdk/runtime/xdk/dsound.cpp	2026-11-09 23:51:35.887004089 -0300
+@@ -88,6 +88,10 @@
+ #define SYM_IDirectSoundBuffer_PlayEx FFFFFE40
+ #define HAS_IDirectSoundBuffer_PlayEx 0
+ #endif
++#ifndef SYM_IDirectSoundBuffer_Pause
++#define SYM_IDirectSoundBuffer_Pause FFFFFE3F
++#define HAS_IDirectSoundBuffer_Pause 0
++#endif
+ #ifndef SYM_IDirectSoundBuffer_PauseEx
+ #define SYM_IDirectSoundBuffer_PauseEx FFFFFE41
+ #define HAS_IDirectSoundBuffer_PauseEx 0
+@@ -148,6 +152,10 @@
+ #define SYM_CDirectSoundStream_SetOutputBuffer FFFFFE4F
+ #define HAS_CDirectSoundStream_SetOutputBuffer 0
+ #endif
++#ifndef SYM_CDirectSoundStream_SetRolloffCurve
++#define SYM_CDirectSoundStream_SetRolloffCurve FFFFFE53
++#define HAS_CDirectSoundStream_SetRolloffCurve 0
++#endif
+ #ifndef SYM_IDirectSound_CreateSoundStream
+ #define SYM_IDirectSound_CreateSoundStream FFFFFE50
+ #define HAS_IDirectSound_CreateSoundStream 0
+@@ -1054,8 +1062,17 @@
+     W32(info + 12, 0);
+     return 0;
+ }
++// DSSTREAMSTATUS: READY (XMEDIASTATUS_ACCEPT_INPUT) 1, PLAYING 0x10000, PAUSED 0x20000, STARVED 0x40000. A stream
++// plays from its first packet until it runs out after a discontinuity or is flushed; paused it is PAUSED instead.
++// TimeSplitters 2 waits for (status & 0x30000) == PLAYING before it starts a cutscene with its music, and to stop
++// its music pauses the stream and then waits for PLAYING to clear.
+ STREAM(GetStatus, 2) {
+-    W32(a[1], v.packets.size() < v.max_packets ? 1u : 0u);  // XMEDIASTATUS_ACCEPT_INPUT
++    uint32_t s = v.packets.size() < v.max_packets ? 1u : 0u;
++    if (v.active) {
++        s |= v.paused ? 0x20000 : 0x10000;
++        if (v.packets.empty()) s |= 0x40000;
++    }
++    W32(a[1], s);
+     return 0;
+ }
+ STREAM(Process, 3) {
+@@ -1125,6 +1142,12 @@
+ }
+ STREAM(SetVelocity, 5) { return 0; }
+ STREAM(SetI3DL2Source, 3) { return 0; }
++// (this, curve, points, apply), as a buffer's (TimeSplitters: Future Perfect, XDK 5849, gives its streams one)
++STREAM(SetRolloffCurve, 4) {
++    v.curve.clear();
++    for (uint32_t i = 0; a[1] && i < std::min<uint32_t>(a[2], 64); i++) v.curve.push_back(F32(R32(a[1] + i * 4)));
++    return 0;
++}
+ 
+ // ---- XDK 4928 additions (The Two Towers). Arg counts from the 4928 code's ret imm16. ----
+ // lPitch is in 1/4096 octave relative to 48 kHz (XAudioCalculatePitch's inverse)
+@@ -1150,6 +1173,12 @@
+     v.sync = a[3] == 2 && v.playing;
+     return 0;
+ }
++// (this, DSBPAUSE_*): PauseEx without the time (TimeSplitters 2, XDK 4721, pauses its sounds with the game)
++BUFFER(Pause, 2) {
++    v.paused = a[1] == 1;
++    v.sync = a[1] == 2 && v.playing;
++    return 0;
++}
+ BUFFER(SetPitch, 2) {
+     v.freq = PitchToHz(a[1]);
+     return 0;
+diff -ruN a/sdk/runtime/xdk/xapi.cpp b/sdk/runtime/xdk/xapi.cpp
+--- a/sdk/runtime/xdk/xapi.cpp	2026-11-10 01:22:43.410406238 -0300
++++ b/sdk/runtime/xdk/xapi.cpp	2026-11-08 20:22:22.000000000 -0300
+@@ -155,6 +155,28 @@
+     return 0;
+ }
+ 
++// XInputGetCapabilities(handle, capabilities): a gamepad on the handle's port with every control. Left to the library
++// it asks the USB stack, which the host doesn't run, and TimeSplitters 2 then asks for the controller to be reconnected.
++HLE_STDCALL(XInputGetCapabilities, 2) {
++    uint32_t port;
++    {
++        std::lock_guard<std::mutex> lock(g_ports_lock);
++        auto it = g_handles.find(a[0]);
++        if (it == g_handles.end()) return 6;  // ERROR_INVALID_HANDLE
++        port = it->second.port;
++    }
++    input::Pad p = input::Poll(int(port));
++    ApplyPadScript(int(port), p);
++    if (!p.connected) return 1167;  // ERROR_DEVICE_NOT_CONNECTED
++    // XINPUT_CAPABILITIES: SubType, Reserved, In.Gamepad (buttons, 8 analog buttons, 4 thumb axes), Out.Rumble
++    uint8_t caps[26] = {};
++    caps[0] = 1;  // XINPUT_DEVSUBTYPE_GC_GAMEPAD
++    caps[4] = 0xFF;
++    for (int i = 6; i < 26; i++) caps[i] = 0xFF;
++    std::memcpy(HostPtr(a[1]), caps, sizeof(caps));
++    return 0;
++}
++
+ HLE_STDCALL(XInputGetState, 2) {
+     uint32_t port;
+     {
+diff -ruN a/sdk/xdk/4721/layout.toml b/sdk/xdk/4721/layout.toml
+--- a/sdk/xdk/4721/layout.toml	1969-12-31 21:00:00.000000000 -0300
++++ b/sdk/xdk/4721/layout.toml	2026-11-08 20:06:11.000000000 -0300
+@@ -0,0 +1,70 @@
++# XDK 4721 library data layouts the runtime reads or writes, for TimeSplitters 2 (title 4553000A).
++# Checked 2026-11-08 against its D3D code: Textures 0xB38 / Push 0 / PushThreshold 4 / Time 0x30 / DirtyFlags_Texture
++# 0x4800 into D3D__DirtyFlags 0x1E8E24 (SetTexture 0x1DB6E0), Transforms 0x810 (SetTransform 0x1DAE30), RenderTarget
++# 0x21B4 / BackBuffer 0x21C0 / BackBufferScale 0x528 (CommonSetRenderTarget 0x1DCE30, GetBackBuffer2 0x1DB1B0), Depth
++# 0x21B8 (Clear 0x1DAA20), SwapCount 0x2C10 (Swap 0x1DEFF0), Size 0xB0C dwords (CreateDevice 0x1DDA50, device 0x1E92C0),
++# PixelShader 0x370 / Definition 8 / Flags 8 (SetPixelShader 0x1DF600), VertexShader 0x380 (SetVertexShader 0x1DE490),
++# Viewport 0xA90 / SuperSample 0x518, 0x51C / ZScale 0x510 / ScreenSpaceOffset 0xAA8 (GetViewportOffsetAndScale
++# 0x1DC000, SetScreenSpaceOffset 0x1DBC00), VBlankCallback 0x2550 / VBlankEvent 0x2554 / miniport +0x23C0
++# (SetVerticalBlankCallback 0x1DAFC0, BlockUntilVerticalBlank 0x1DAFE0), Palettes 0xB48 (teardown 0x1E2364),
++# IndexBuffer 0x38C (teardown 0x1E233E; SetIndices is inline in the game), streams 12 bytes at D3D__g_Stream 0x1EBEF0
++# (SetStreamSource 0x1DE070), texture stage states 32 dwords at 0x1E8E28 (SetTextureStageStateNotInline 0x1DC9D0):
++# all as 4928. The rest are 4928's, unchecked here (the proofs quoted below are The Two Towers' addresses).
++# The Two Towers (title 45410010) default.xbe code at the address given. Derived 2026-10-12.
++# Same keys as xdk/5849/layout.toml. Where a value equals 5849 that is noted; the CDevice moved a lot.
++[layout]
++# D3D8 CDevice, the static device D3D__pDevice (0x124180) points at (0x124930, Direct3D_CreateDevice 0x119789)
++CDevice_Push          = 0x0     # D3DDevice_SetTexture 0x117B22 reads it, compares with +4, calls MakeSpace 0x11ABA0 (= 5849)
++CDevice_PushThreshold = 0x4     # D3DDevice_SetTexture 0x117B25 compares the push pointer with it (= 5849)
++CDevice_BaseVertex    = 0x1C    # D3DDevice_SetIndices 0x117CD9 stores BaseVertexIndex (= 5849)
++CDevice_IndexBuffer   = 0x38C   # D3DDevice_SetIndices 0x117CAA reads the old one, 0x117CD2 stores the new one
++CDevice_ZScale        = 0x510   # D3DDevice_GetViewportOffsetAndScale 0x114C45 scales the Z range by it
++CDevice_SuperSampleX  = 0x518   # D3DDevice_GetViewportOffsetAndScale 0x114B9E scales viewport X by it
++CDevice_SuperSampleY  = 0x51C   # D3DDevice_GetViewportOffsetAndScale 0x114BC0 scales viewport Y by it
++CDevice_Transforms    = 0x810   # D3DDevice_SetTransform 0x117246 copies 16 dwords to +0x810 + type * 64
++CDevice_Textures      = 0xB38   # D3DDevice_SetTexture 0x117AE0 reads, 0x117B19 stores [stage]
++CDevice_Palettes      = 0xB48   # the device teardown 0x11D484 walks +0xB48 per stage and releases [-0x10] (textures) and the palette; Textures + 0x10 as in 5849
++CDevice_RenderTarget  = 0x21B4  # D3D_CommonSetRenderTarget 0x115CC2 stores it, D3DDevice_SetViewport 0x11797A compares it with the back buffer
++CDevice_Depth         = 0x21B8  # D3D_CommonSetRenderTarget 0x115CEB stores it
++CDevice_BackBuffer    = 0x21C0  # D3DDevice_GetBackBuffer2 0x1175D0 returns it for index 0
++CDevice_FrontBuffer   = 0x21C4  # D3DDevice_GetBackBuffer2 0x1175B5 returns it for index -1
++CDevice_SwapCount     = 0x2C10  # D3DDevice_Swap 0x11A2E0 increments it, 0x11A351 returns it
++CDevice_Size          = 0x2C30  # Direct3D_CreateDevice 0x1197CB clears 0xB0C dwords of the device on failure
++CDevice_Flags             = 0x8    # Direct3D_CreateDevice 0x11977F ors BehaviorFlags & 0x10 into it (0x124938) (= 5849)
++CDevice_Time              = 0x30   # D3D_KickOffAndWaitForIdle 0x11ABF5 passes it to D3D_BlockOnTime, D3D_SetFence 0x11A8C3 adds 2
++CDevice_PixelShader       = 0x370  # D3DDevice_SetPixelShader 0x119278 stores the handle
++CDevice_VertexShader      = 0x380  # D3DDevice_SetVertexShader 0x117031 reads, 0x117088 stores the current shader (FVF shader object 0x124800)
++CDevice_BackBufferScale   = 0x528  # the frame buffer init 0x11CA1A stores the X scale as a float, 0x11CA33 the Y scale at +4 (SuperSampleX + 0x10 as in 5849)
++CDevice_Viewport          = 0xA90  # D3DDevice_GetViewportOffsetAndScale 0x114B85..0x114C4F reads X, Y, Width, Height, MinZ, MaxZ at +0..+0x14
++CDevice_ScreenSpaceOffset = 0xAA8  # D3DDevice_SetScreenSpaceOffset 0x1180D3 stores x + 0.53125, 0x1180E3 y + 0.53125 at +4
++CDevice_AutoDepth         = 0x21CC # the frame buffer init 0x11CAD9 stores the depth buffer (BackBuffer + 0xC as in 5849)
++# the miniport is at +0x23C0 (5849: +0x1C28); its own field offsets are unchanged from 5849
++CDevice_VBlankCallback    = 0x2550 # D3DDevice_SetVerticalBlankCallback 0x1173FA stores it = miniport + 0x190, which the vertical blank handler 0x11DB4E calls
++CDevice_VBlankEvent       = 0x2554 # D3DDevice_BlockUntilVerticalBlank 0x11742D waits on it, 0x11741B clears its SignalState
++CDevice_DisplayFlags      = 0x2574 # miniport + 0x1B4: the mode set 0x11D82A stores it, 0x11996B tests 0x1000000
++CDevice_VBlankCount       = 0x2580 # miniport + 0x1C0: the vertical blank handler 0x11DAA4..0x11DAB1 increments it, 0x1199E7 reads it
++CDevice_Field             = 0x2590 # miniport + 0x1D0: the vertical blank handler 0x11DB14/0x11DB23 stores the field
++CDevice_GammaRamps        = 0x259C # D3DDevice_SetGammaRamp 0x1171F3 copies to miniport + 0x1DC + index * 0x300
++CDevice_GammaPending      = 0x2B9C # D3DDevice_SetGammaRamp 0x117211 sets [miniport + 0x7DC + index * 4]
++# D3D8 globals
++DirtyFlags_Texture    = 0x4800  # D3DDevice_SetTexture 0x117B57 ors it into D3D__DirtyFlags (0x12418C) (= 5849)
++TextureState_Stage    = 32      # D3DDevice_SetTextureStageStateNotInline 0x1155CB: [stage * 32 + type] dwords (= 5849)
++Stream_Size           = 12      # D3DDevice_SetStreamSource 0x116C8A indexes the stream table by n * 12 (= 5849)
++Stream_Stride         = 0x0     # D3DDevice_SetStreamSource 0x116CD2 stores Stride (= 5849)
++Stream_Buffer         = 0x8     # D3DDevice_SetStreamSource 0x116CD8 stores the vertex buffer (= 5849)
++PixelShader_Definition = 0x8  # D3DDevice_SetPixelShader 0x1192E0 reads the definition pointer (= 5849)
++# DSOUND
++CDirectSoundStream_Vtable  = 0x0  # CDirectSoundStream constructor 0x12B414 stores the first vtable 0x185160 (= 5849)
++CDirectSoundStream_Vtable2 = 0x4  # CDirectSoundStream constructor 0x12B40D stores the second vtable 0x185154 (= 5849)
++EffectsImage_Skip0    = 0x804   # 0x12BFB3 adds this dword count (= 5849)
++EffectsImage_Skip1    = 0x80C   # 0x12BFAD loads this dword count (= 5849)
++EffectsImage_Desc     = 0x818   # 0x12BFBC: descriptor at image + 0x818 + (Skip0 + Skip1) * 4 (= 5849)
++# XAPI XPP device type record
++XPP_Current           = 0x0     # XGetDevices 0x1698AA returns it (= 5849)
++XPP_Changed           = 0x4     # XGetDevices 0x1698AC clears it (= 5849)
++XPP_Previous          = 0x8     # XGetDevices 0x1698B2 copies Current into it (= 5849)
++
++# Extra 4928 facts this title needs (not read by the 5849 runtime):
++# CDevice + 0x350..0x35C  push-buffer recording state: D3DDevice_BeginPushBuffer 0x11AFDB stores the buffer at +0x350,
++#                         clears +0x354, saves the push pointer/threshold at +0x35C/+0x358; EndPushBuffer 0x11B04B restores them
++# CDevice + 0x2550        = miniport + 0x190 (vertical blank callback slot)

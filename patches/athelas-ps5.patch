@@ -1,0 +1,615 @@
+--- a/sdk/runtime/core/log.cpp	2026-11-07 15:26:12.357692193 -0300
++++ b/sdk/runtime/core/log.cpp	2026-11-07 15:26:18.017768219 -0300
+@@ -1,6 +1,7 @@
+ #include "core/log.h"
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <chrono>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -18,6 +19,9 @@
+ static FILE* g_file = nullptr;
+ static std::string g_path;
+ static auto g_start = std::chrono::steady_clock::now();
++static std::atomic<bool> g_off{false};
++
++void Off() { g_off.store(true, std::memory_order_relaxed); }
+ 
+ constexpr int kKeep = 30;
+ 
+@@ -30,6 +34,7 @@
+ }
+ 
+ void Init(const std::string& dir, const std::string& prefix, bool append) {
++    if (g_off.load(std::memory_order_relaxed)) return;
+     std::lock_guard<std::mutex> lock(g_mutex);
+     std::error_code ec;
+     fs::create_directories(dir, ec);
+@@ -52,6 +57,7 @@
+ const std::string& Path() { return g_path; }
+ 
+ void Write(Level lv, const char* fmt, ...) {
++    if (g_off.load(std::memory_order_relaxed)) return;  // logging off: nothing formatted, nothing written
+     // XBE_LOG_ALL set: a release build keeps its Info and Warn lines too (testing: the one-time notices, LOG_FIRST)
+     static const bool all = kVerbose || std::getenv("XBE_LOG_ALL") != nullptr;
+     if (!kVerbose && lv < (all ? Level::Info : Level::Error)) return;
+diff -ruN a/sdk/runtime/core/log.h b/sdk/runtime/core/log.h
+--- a/sdk/runtime/core/log.h	2026-11-07 15:26:12.357692193 -0300
++++ b/sdk/runtime/core/log.h	2026-11-07 15:26:18.017953607 -0300
+@@ -13,6 +13,8 @@
+ void Init(const std::string& dir, const std::string& prefix, bool append = false);
+ void Write(Level lv, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+ void Flush();
++// no more lines, from anywhere (a build that keeps no log); before Init, no file either
++void Off();
+ const std::string& Path();
+ 
+ #ifdef NDEBUG
+diff -ruN a/sdk/runtime/gpu/texture_pack.cpp b/sdk/runtime/gpu/texture_pack.cpp
+--- a/sdk/runtime/gpu/texture_pack.cpp	2026-11-07 15:26:12.362471130 -0300
++++ b/sdk/runtime/gpu/texture_pack.cpp	2026-11-07 17:11:09.804209548 -0300
+@@ -209,6 +209,19 @@
+ BuiltinTexture g_builtin = nullptr;
+ BuiltinContents g_builtin_contents = nullptr;
+ UpscaleTexture g_upscale = nullptr;
++Upscale2D g_upscale_2d = nullptr;
++
++// fn(first, end) over [0, n), split between up to 8 threads (rotk-ps5: an upscale on the draw thread, kept short)
++template <class Fn>
++static void ParallelRows(uint32_t n, Fn fn) {
++    uint32_t k = std::clamp(std::thread::hardware_concurrency(), 1u, 8u);
++    if (n < 64) k = 1;
++    uint32_t step = (n + k - 1) / k;
++    std::vector<std::thread> threads;
++    for (uint32_t a = step; a < n; a += step) threads.emplace_back(fn, a, std::min(a + step, n));
++    fn(0u, std::min(step, n));
++    for (std::thread& t : threads) t.join();
++}
+ 
+ void Upscale(const std::vector<uint8_t>& rgba, uint32_t w, uint32_t h, uint32_t k, std::vector<uint8_t>& out) {
+     // premultiplied, so clear texels' colour does not bleed into the edges
+@@ -228,24 +241,26 @@
+     auto pass = [&](const std::vector<float>& in, uint32_t iw, uint32_t ih, bool horiz, uint32_t on) {
+         uint32_t ow = horiz ? on : iw, oh = horiz ? ih : on, n = horiz ? iw : ih;
+         std::vector<float> o(size_t(ow) * oh * 4);
+-        for (uint32_t d = 0; d < on; d++) {
+-            float f = (d + 0.5f) * float(n) / float(on) - 0.5f;
+-            int i0 = int(std::floor(f));
+-            float wt[4], sum = 0;
+-            for (int t = 0; t < 4; t++) sum += wt[t] = cubic(f - float(i0 - 1 + t));
+-            for (int t = 0; t < 4; t++) wt[t] /= sum;
+-            uint32_t lines = horiz ? ih : iw;
+-            for (uint32_t l = 0; l < lines; l++) {
+-                float acc[4] = {};
+-                for (int t = 0; t < 4; t++) {
+-                    int j = std::clamp(i0 - 1 + t, 0, int(n) - 1);
+-                    size_t at = horiz ? (size_t(l) * iw + j) * 4 : (size_t(j) * iw + l) * 4;
+-                    for (int c = 0; c < 4; c++) acc[c] += wt[t] * in[at + c];
++        ParallelRows(on, [&](uint32_t first, uint32_t end) {
++            for (uint32_t d = first; d < end; d++) {
++                float f = (d + 0.5f) * float(n) / float(on) - 0.5f;
++                int i0 = int(std::floor(f));
++                float wt[4], sum = 0;
++                for (int t = 0; t < 4; t++) sum += wt[t] = cubic(f - float(i0 - 1 + t));
++                for (int t = 0; t < 4; t++) wt[t] /= sum;
++                uint32_t lines = horiz ? ih : iw;
++                for (uint32_t l = 0; l < lines; l++) {
++                    float acc[4] = {};
++                    for (int t = 0; t < 4; t++) {
++                        int j = std::clamp(i0 - 1 + t, 0, int(n) - 1);
++                        size_t at = horiz ? (size_t(l) * iw + j) * 4 : (size_t(j) * iw + l) * 4;
++                        for (int c = 0; c < 4; c++) acc[c] += wt[t] * in[at + c];
++                    }
++                    size_t to = horiz ? (size_t(l) * ow + d) * 4 : (size_t(d) * ow + l) * 4;
++                    for (int c = 0; c < 4; c++) o[to + c] = acc[c];
+                 }
+-                size_t to = horiz ? (size_t(l) * ow + d) * 4 : (size_t(d) * ow + l) * 4;
+-                for (int c = 0; c < 4; c++) o[to + c] = acc[c];
+             }
+-        }
++        });
+         return o;
+     };
+     std::vector<float> big = pass(pass(src, w, h, true, W), W, h, false, H);
+@@ -254,16 +269,18 @@
+     int r = int(k);
+     for (int axis = 0; axis < 2; axis++) {
+         std::vector<float> t = blur;
+-        for (uint32_t y = 0; y < H; y++)
+-            for (uint32_t x = 0; x < W; x++) {
+-                float acc[4] = {};
+-                for (int o = -r; o <= r; o++) {
+-                    int xx = axis ? int(x) : std::clamp(int(x) + o, 0, int(W) - 1);
+-                    int yy = axis ? std::clamp(int(y) + o, 0, int(H) - 1) : int(y);
+-                    for (int c = 0; c < 4; c++) acc[c] += t[(size_t(yy) * W + xx) * 4 + c];
++        ParallelRows(H, [&](uint32_t first, uint32_t end) {
++            for (uint32_t y = first; y < end; y++)
++                for (uint32_t x = 0; x < W; x++) {
++                    float acc[4] = {};
++                    for (int o = -r; o <= r; o++) {
++                        int xx = axis ? int(x) : std::clamp(int(x) + o, 0, int(W) - 1);
++                        int yy = axis ? std::clamp(int(y) + o, 0, int(H) - 1) : int(y);
++                        for (int c = 0; c < 4; c++) acc[c] += t[(size_t(yy) * W + xx) * 4 + c];
++                    }
++                    for (int c = 0; c < 4; c++) blur[(size_t(y) * W + x) * 4 + c] = acc[c] / float(2 * r + 1);
+                 }
+-                for (int c = 0; c < 4; c++) blur[(size_t(y) * W + x) * 4 + c] = acc[c] / float(2 * r + 1);
+-            }
++        });
+     }
+     out.resize(size_t(W) * H * 4);
+     for (size_t i = 0; i < size_t(W) * H; i++) {
+diff -ruN a/sdk/runtime/gpu/texture_pack.h b/sdk/runtime/gpu/texture_pack.h
+--- a/sdk/runtime/gpu/texture_pack.h	2026-11-07 15:26:12.362471130 -0300
++++ b/sdk/runtime/gpu/texture_pack.h	2026-11-07 17:11:09.805761255 -0300
+@@ -53,6 +53,10 @@
+ // console made it): true for one to redraw, at g_upscale_factor times its size, cubic with its edges sharpened
+ using UpscaleTexture = bool (*)(uint64_t hash);
+ extern UpscaleTexture g_upscale;
++// rotk-ps5: a small picture a 2D draw (the HUD, menus) reads, asked once as it binds: true to have it redrawn like
++// g_upscale's (g_upscale then answers true for its hash)
++using Upscale2D = bool (*)(uint64_t hash, uint32_t width, uint32_t height, uint32_t format);
++extern Upscale2D g_upscale_2d;
+ // rgba (w x h, rows packed) redrawn k times larger, sharp: cubic, then an unsharp mask scaled to the new size
+ void Upscale(const std::vector<uint8_t>& rgba, uint32_t w, uint32_t h, uint32_t k, std::vector<uint8_t>& out);
+ // an RGBA8 or BGRA8 picture's mip levels below level 0, each made by halving
+diff -ruN a/sdk/runtime/gpu/vk.cpp b/sdk/runtime/gpu/vk.cpp
+--- a/sdk/runtime/gpu/vk.cpp	2026-11-07 15:26:12.362471130 -0300
++++ b/sdk/runtime/gpu/vk.cpp	2026-11-07 17:11:21.243104524 -0300
+@@ -2,10 +2,12 @@
+ // ring, render targets by console address, Clear, and Present showing the front buffer. Draws are not done yet: every
+ // other call is a safe no-op, logged once.
+ // Init failing (no Vulkan, no 1.2 device, no swapchain) leaves the game on Direct3D 12 (xdk/d3d8.cpp).
++#ifdef _WIN32
+ #ifndef NOMINMAX
+ #define NOMINMAX
+ #endif
+ #include <windows.h>
++#endif
+ 
+ #include <algorithm>
+ #include <atomic>
+@@ -24,7 +26,12 @@
+ #endif
+ #include <imgui.h>
+ #include <backends/imgui_impl_vulkan.h>
++#ifdef _WIN32
+ #include <backends/imgui_impl_win32.h>
++#define GPU_VK_SURFACE_EXTENSION VK_KHR_WIN32_SURFACE_EXTENSION_NAME
++#else
++#define GPU_VK_SURFACE_EXTENSION VK_KHR_DISPLAY_EXTENSION_NAME  // PS5: VideoOut through VK_KHR_display
++#endif
+ 
+ #include "app/app.h"
+ #include "core/log.h"
+@@ -41,6 +48,10 @@
+ 
+ namespace gpu {
+ 
++// texture_dump writes only textures at most this wide and high (0: every one). The PS5 host sets 128: the menus'
++// button pictures, without a session's worth of scenery
++uint32_t g_dump_max_size = 0;
++
+ namespace {
+ 
+ using namespace gpu::vk;
+@@ -167,6 +178,7 @@
+     double fps_ = 0;
+     uint64_t fps_frames_ = 0;
+     uint64_t fps_start_ = 0;
++    bool hud_draw_ = false;  // rotk-ps5: the draw binding its textures is a 2D one (g_upscale_2d)
+ 
+     // draws
+     struct Tex {
+@@ -174,6 +186,7 @@
+         TextureDesc d;
+         uint32_t levels = 1, host_w = 0, host_h = 0;
+         uint64_t sig = 0, frame = 0, palette = 0;
++        bool hud_asked = false;  // rotk-ps5: g_upscale_2d asked about it
+         // a texture pack's file drawn in its place (TexturePack): its view, owned by pack_cache_ or by own below
+         VkImageView repl = VK_NULL_HANDLE;
+         uint32_t repl_w = 0, repl_h = 0;
+@@ -341,9 +354,9 @@
+     std::vector<VkExtensionProperties> ext(n);
+     vkEnumerateInstanceExtensionProperties(nullptr, &n, ext.data());
+     ext.resize(n);
+-    for (const char* need : {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME})
++    for (const char* need : {VK_KHR_SURFACE_EXTENSION_NAME, GPU_VK_SURFACE_EXTENSION})
+         if (!HasExtension(ext, need)) return Fail(std::string("the instance has no ") + need);
+-    const char* names[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
++    const char* names[] = {VK_KHR_SURFACE_EXTENSION_NAME, GPU_VK_SURFACE_EXTENSION};
+     VkApplicationInfo app_info{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+     app_info.pApplicationName = app::kGame.log;
+     app_info.pEngineName = "taxbox";
+@@ -355,11 +368,75 @@
+     VkResult r = vkCreateInstance(&ci, nullptr, &instance_);
+     if (r != VK_SUCCESS) return Fail("vkCreateInstance", r);
+     LoadInstance(instance_);
++#ifdef _WIN32
+     if (!vkCreateWin32SurfaceKHR || !vkEnumeratePhysicalDevices || !vkGetDeviceProcAddr)
++#else
++    if (!vkCreateDisplayPlaneSurfaceKHR || !vkEnumeratePhysicalDevices || !vkGetDeviceProcAddr)
++#endif
+         return Fail("the instance functions could not be loaded");
+     return true;
+ }
+ 
++#ifndef _WIN32
++// PS5: the console's one GPU and VideoOut's one display. The mode closest to app::Output() (4K by default) on the
++// first plane that can show that display; the same steps as reUndr's SDL_ps5vulkan.c (MIT, bystritskiy).
++bool VkBackend::CreateSurface() {
++    uint32_t n = 0;
++    vkEnumeratePhysicalDevices(instance_, &n, nullptr);
++    std::vector<VkPhysicalDevice> gpus(n);
++    if (n) vkEnumeratePhysicalDevices(instance_, &n, gpus.data());
++    if (!n) return Fail("no Vulkan graphics device");
++    VkPhysicalDevice gpu = gpus[0];
++    uint32_t dn = 0;
++    if (vkGetPhysicalDeviceDisplayPropertiesKHR(gpu, &dn, nullptr) != VK_SUCCESS || !dn) return Fail("VideoOut has no display");
++    std::vector<VkDisplayPropertiesKHR> displays(dn);
++    vkGetPhysicalDeviceDisplayPropertiesKHR(gpu, &dn, displays.data());
++    VkDisplayKHR display = displays[0].display;
++    uint32_t mn = 0;
++    if (vkGetDisplayModePropertiesKHR(gpu, display, &mn, nullptr) != VK_SUCCESS || !mn) return Fail("VideoOut has no modes");
++    std::vector<VkDisplayModePropertiesKHR> modes(mn);
++    vkGetDisplayModePropertiesKHR(gpu, display, &mn, modes.data());
++    const app::Mode want = app::Output();
++    size_t best = 0;
++    int64_t best_d = INT64_MAX;
++    for (size_t i = 0; i < modes.size(); i++) {
++        const VkExtent2D& e = modes[i].parameters.visibleRegion;
++        int64_t d = std::llabs(int64_t(e.width) - want.width) + std::llabs(int64_t(e.height) - want.height);
++        if (d < best_d || (d == best_d && modes[i].parameters.refreshRate > modes[best].parameters.refreshRate)) {
++            best = i;
++            best_d = d;
++        }
++    }
++    const VkDisplayModePropertiesKHR& mode = modes[best];
++    uint32_t pn = 0;
++    if (vkGetPhysicalDeviceDisplayPlanePropertiesKHR(gpu, &pn, nullptr) != VK_SUCCESS || !pn) return Fail("VideoOut has no planes");
++    int plane = -1;
++    for (uint32_t i = 0; i < pn && plane < 0; i++) {
++        uint32_t sn = 0;
++        if (vkGetDisplayPlaneSupportedDisplaysKHR(gpu, i, &sn, nullptr) != VK_SUCCESS || !sn) continue;
++        std::vector<VkDisplayKHR> supported(sn);
++        vkGetDisplayPlaneSupportedDisplaysKHR(gpu, i, &sn, supported.data());
++        for (VkDisplayKHR d : supported)
++            if (d == display) plane = int(i);
++    }
++    if (plane < 0) return Fail("no plane shows the PS5's display");
++    VkDisplayPlaneCapabilitiesKHR caps{};
++    vkGetDisplayPlaneCapabilitiesKHR(gpu, mode.displayMode, uint32_t(plane), &caps);
++    VkDisplaySurfaceCreateInfoKHR ci{VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR};
++    ci.displayMode = mode.displayMode;
++    ci.planeIndex = uint32_t(plane);
++    ci.transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
++    ci.alphaMode = (caps.supportedAlpha & VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR) ? VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR
++                                                                                 : VK_DISPLAY_PLANE_ALPHA_GLOBAL_BIT_KHR;
++    ci.globalAlpha = 1.0f;
++    ci.imageExtent = mode.parameters.visibleRegion;
++    VkResult r = vkCreateDisplayPlaneSurfaceKHR(instance_, &ci, nullptr, &surface_);
++    if (r != VK_SUCCESS) return Fail("vkCreateDisplayPlaneSurfaceKHR", r);
++    LOGR("vulkan: VideoOut %ux%u at %.2f Hz, plane %d", ci.imageExtent.width, ci.imageExtent.height,
++         mode.parameters.refreshRate / 1000.0, plane);
++    return true;
++}
++#else
+ bool VkBackend::CreateSurface() {
+     VkWin32SurfaceCreateInfoKHR ci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+     ci.hinstance = ::GetModuleHandleW(nullptr);
+@@ -369,6 +446,7 @@
+     if (r != VK_SUCCESS) return Fail("vkCreateWin32SurfaceKHR", r);
+     return true;
+ }
++#endif
+ 
+ bool VkBackend::PickDevice() {
+     uint32_t n = 0;
+@@ -497,9 +575,13 @@
+     if (r != VK_SUCCESS) return Fail("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", r);
+     VkExtent2D ext = caps.currentExtent;
+     if (ext.width == 0xFFFFFFFFu) {
++#ifdef _WIN32
+         RECT rc{};
+         ::GetClientRect(static_cast<HWND>(app::Window()), &rc);
+         ext = {uint32_t(std::max<LONG>(rc.right - rc.left, 1)), uint32_t(std::max<LONG>(rc.bottom - rc.top, 1))};
++#else
++        ext = {app::Output().width, app::Output().height};
++#endif
+         ext.width = std::clamp(ext.width, caps.minImageExtent.width, caps.maxImageExtent.width);
+         ext.height = std::clamp(ext.height, caps.minImageExtent.height, caps.maxImageExtent.height);
+     }
+@@ -1562,6 +1644,17 @@
+             tx.sig = UploadTexture(tx, p, pal_va ? colours : nullptr) ? sig : 0;  // a failed one is tried again
+         }
+     }
++    // rotk-ps5: a picture a 2D draw reads, without a replacement: asked once whether it is to be redrawn larger; then
++    // its remembered "no replacement" is forgotten and it is uploaded again on its next check, redrawn by g_upscale
++    if (hud_draw_ && !tx.repl && !tx.hud_asked && tx.pack_hash && !d.linear && !d.cube && d.depth == 1) {
++        tx.hud_asked = true;
++        auto it = pack_cache_.find(tx.pack_hash);
++        if ((it == pack_cache_.end() || !it->second.img.view) &&
++            pack::g_upscale_2d(tx.pack_hash, d.width, d.height, d.format)) {
++            if (it != pack_cache_.end()) pack_cache_.erase(it);
++            tx.sig = 0;
++        }
++    }
+     // a replacement is sampled at its own size: the shader's coordinates are 0..1 (or divided by the console's size
+     // for linear textures, texsize), so only smooth_2d's texel step needs the new size
+     if (tx.repl) {
+@@ -1598,7 +1691,8 @@
+         for (uint32_t l = 0; l < tx.levels; l++) {
+             uint32_t pitch = 0;
+             DecodeLevel(d, l, f, p, colours, px, pitch);
+-            if (packable && !d.linear && app::Get().texture_dump && f == 0 && l == 0) {
++            if (packable && !d.linear && app::Get().texture_dump && f == 0 && l == 0 &&
++                (!g_dump_max_size || (d.width <= g_dump_max_size && d.height <= g_dump_max_size))) {
+                 // the level as decoded, rows tightly packed
+                 uint32_t rb = pack::RowBytes(pf, d.width), prow = pack::Rows(pf, d.height);
+                 std::vector<uint8_t>& out = levels.emplace_back(size_t(rb) * prow, 0);
+@@ -1820,6 +1914,9 @@
+     si.addressModeV = VkAddress(t[kTssAddressV]);
+     si.addressModeW = VkAddress(t[kTssAddressW]);
+     si.mipLodBias = Bits(t[kTssMipLodBias]) + (target ? 0.0f : app::Get().lod_bias);
++    // to a 16th of a level: a game that sets the bias by distance or time otherwise makes a new sampler for every
++    // value (rotk-ps5: The Return of the King reached the 3000 below within minutes, and then drew with a plain one)
++    si.mipLodBias = std::round(si.mipLodBias * 16.0f) / 16.0f;
+     si.minLod = float(t[kTssMaxMipLevel]);
+     si.maxLod = mip ? VK_LOD_CLAMP_NONE : si.minLod;
+     // Vulkan's border is one of three colours: the nearest of transparent black, opaque black, opaque white
+@@ -2009,7 +2106,10 @@
+     // stage textures (uploads and copies end the rendering), then the pixel shader made for them
+     StageBind sb[4];
+     TexInfo info[4];
++    // rotk-ps5: a 2D draw (the HUD, menus): its small pictures may be redrawn larger (pack::g_upscale_2d)
++    hud_draw_ = pack::g_upscale_2d && g_screen_space_test && !g_movie && g_screen_space_test(s);
+     for (int i = 0; i < 4; i++) BindTexture(s, i, rt, ds, sb[i], info[i]);
++    hud_draw_ = false;
+     // a texture pack's picture can fill much of the ring: finished now, while nothing of this draw's own (constants,
+     // vertices) sits in it, so they still fit; the uploaded images and their layouts are kept across the submit
+     if (Cmd() && frames_[frame_].used > kUploadSize - kUploadReserve) Submit(true);
+@@ -2535,7 +2635,18 @@
+     if (!ui_) return;
+     std::lock_guard lock(app::UiLock());
+     ImGui_ImplVulkan_NewFrame();
++#ifdef _WIN32
+     ImGui_ImplWin32_NewFrame();
++#else
++    {  // no window backend: the screen's size and the time since the last frame
++        ImGuiIO& io = ImGui::GetIO();
++        static auto last = std::chrono::steady_clock::now();
++        auto now = std::chrono::steady_clock::now();
++        io.DisplaySize = ImVec2(float(extent_.width), float(extent_.height));
++        io.DeltaTime = std::max(1e-4f, std::chrono::duration<float>(now - last).count());
++        last = now;
++    }
++#endif
+     ImGui::NewFrame();
+     if (app::kGame.ui) app::kGame.ui(fps_);
+     app::DrawOverlay(fps_);
+@@ -2576,7 +2687,8 @@
+ 
+ // presents a second, counted over half a second
+ void VkBackend::CountFps() {
+-    uint64_t now = ::GetTickCount64();
++    uint64_t now = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
++                                std::chrono::steady_clock::now().time_since_epoch()).count());
+     if (!fps_start_) fps_start_ = now;
+     fps_frames_++;
+     if (now - fps_start_ >= 500) {
+diff -ruN a/sdk/runtime/gpu/vk_loader.cpp b/sdk/runtime/gpu/vk_loader.cpp
+--- a/sdk/runtime/gpu/vk_loader.cpp	2026-11-07 15:26:12.362471130 -0300
++++ b/sdk/runtime/gpu/vk_loader.cpp	2026-11-07 15:26:18.018582948 -0300
+@@ -5,6 +5,10 @@
+ #define NOMINMAX
+ #endif
+ #include <windows.h>
++#elif defined(__PROSPERO__)
++// PS5: RADV is linked into the app and exports only its ICD entry; Mesa dispatches physical device and device
++// commands itself, so the pointers it returns serve every handle without a loader
++extern "C" PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* name);
+ #else
+ #include <dlfcn.h>
+ #endif
+@@ -34,6 +38,9 @@
+     g_library = m;
+     vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+         reinterpret_cast<void*>(::GetProcAddress(m, "vkGetInstanceProcAddr")));
++#elif defined(__PROSPERO__)
++    (void)g_library;
++    vkGetInstanceProcAddr = vk_icdGetInstanceProcAddr;
+ #else
+     g_library = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+     if (!g_library) {
+diff -ruN a/sdk/runtime/gpu/vk_loader.h b/sdk/runtime/gpu/vk_loader.h
+--- a/sdk/runtime/gpu/vk_loader.h	2026-11-07 15:26:12.362471130 -0300
++++ b/sdk/runtime/gpu/vk_loader.h	2026-11-07 15:26:18.018630217 -0300
+@@ -26,6 +26,12 @@
+     X(vkGetPhysicalDeviceSurfacePresentModesKHR) GPU_VK_INSTANCE_WIN32(X)
+ #ifdef _WIN32
+ #define GPU_VK_INSTANCE_WIN32(X) X(vkCreateWin32SurfaceKHR)
++#elif defined(__PROSPERO__)
++// PS5: the picture goes to VideoOut through VK_KHR_display (RADV's PS5 WSI), as reUndr's SDL_ps5vulkan.c does
++#define GPU_VK_INSTANCE_WIN32(X)                                                                                        \
++    X(vkGetPhysicalDeviceDisplayPropertiesKHR) X(vkGetDisplayModePropertiesKHR)                                         \
++    X(vkGetPhysicalDeviceDisplayPlanePropertiesKHR) X(vkGetDisplayPlaneSupportedDisplaysKHR)                            \
++    X(vkGetDisplayPlaneCapabilitiesKHR) X(vkCreateDisplayPlaneSurfaceKHR)
+ #else
+ #define GPU_VK_INSTANCE_WIN32(X)
+ #endif
+diff -ruN a/sdk/runtime/kernel/boot.cpp b/sdk/runtime/kernel/boot.cpp
+--- a/sdk/runtime/kernel/boot.cpp	2026-11-07 15:26:12.362471130 -0300
++++ b/sdk/runtime/kernel/boot.cpp	2026-11-07 15:26:18.018754269 -0300
+@@ -193,6 +193,11 @@
+         LOGE("relaunch: cannot start %s.exe (%lu)", exe, GetLastError());
+     }
+     std::_Exit(0);
++#elif defined(__PROSPERO__)
++    // a PS5 app can't exec another program; a title with one recompiled image (The Return of the King) never asks
++    LOGE("relaunch: %s can't be started on the PS5", exe);
++    logx::Flush();
++    std::_Exit(0);
+ #else
+     char self[4096] = {};
+     ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+diff -ruN a/sdk/runtime/kernel/memory.cpp b/sdk/runtime/kernel/memory.cpp
+--- a/sdk/runtime/kernel/memory.cpp	2026-11-07 15:26:12.363531140 -0300
++++ b/sdk/runtime/kernel/memory.cpp	2026-11-07 15:26:18.018888829 -0300
+@@ -11,6 +11,8 @@
+ #ifdef _WIN32
+ #define WIN32_LEAN_AND_MEAN
+ #include <windows.h>
++#elif defined(__PROSPERO__)
++#include <ps5platform/shm.h>
+ #else
+ #include <sys/mman.h>
+ #endif
+@@ -20,6 +22,51 @@
+ static uint8_t* g_base = nullptr;
+ static std::recursive_mutex g_lock;
+ 
++#ifdef __PROSPERO__
++// PS5 (rotk-ps5): host pages are 16 KB, four guest pages each, and a title may not issue raw mmap syscalls. The
++// 4 GB guest space is a reserved range; physical memory is one shared object mapped into both of its windows, and a
++// commit maps 16 KB host pages taken from 16 MB backing slabs. A host page goes back to the pool once all four of its
++// guest pages are decommitted.
++namespace ps5 {
++constexpr size_t kHostPage = 0x4000;
++constexpr size_t kSlabSize = 16u << 20;
++constexpr uint32_t kChunksPerSlab = uint32_t(kSlabSize / kHostPage);
++static ps5_shm g_ram;
++static std::vector<ps5_shm> g_slabs;
++static std::vector<uint32_t> g_free;             // free chunks: slab * kChunksPerSlab + index
++static std::vector<uint32_t> g_mapped;           // per host page of the guest space: chunk + 1, or 0
++
++static bool MapChunk(uint64_t host_page) {
++    if (g_free.empty()) {
++        ps5_shm slab{};
++        if (ps5_shm_create(kSlabSize, &slab)) return false;
++        uint32_t s = uint32_t(g_slabs.size());
++        g_slabs.push_back(slab);
++        for (uint32_t i = kChunksPerSlab; i-- > 0;) g_free.push_back(s * kChunksPerSlab + i);
++        LOGI("memory: backing slab %u (%u MB committed so far)", s, unsigned((s * kSlabSize) >> 20));
++    }
++    uint32_t chunk = g_free.back();
++    void* at = g_base + host_page * kHostPage;
++    void* view = nullptr;
++    if (ps5_shm_map(&g_slabs[chunk / kChunksPerSlab], size_t(chunk % kChunksPerSlab) * kHostPage, kHostPage, at,
++                    PS5_SHM_READ | PS5_SHM_WRITE, PS5_SHM_FIXED, &view) || view != at)
++        return false;
++    g_free.pop_back();
++    std::memset(view, 0, kHostPage);  // a recycled chunk keeps what it held
++    g_mapped[size_t(host_page)] = chunk + 1;
++    return true;
++}
++
++static void UnmapChunk(uint64_t host_page) {
++    uint32_t chunk = g_mapped[size_t(host_page)];
++    if (!chunk) return;
++    ps5_shm_unmap(g_base + host_page * kHostPage, kHostPage, PS5_SHM_KEEP_RESERVED);
++    g_mapped[size_t(host_page)] = 0;
++    g_free.push_back(chunk - 1);
++}
++}  // namespace ps5
++#endif
++
+ uint8_t* Base() { return g_base; }
+ 
+ // physical memory shows at 0x80000000 and again at 0xF0000000 (write combined view)
+@@ -54,6 +101,26 @@
+         UnmapViewOfFile(b + kContiguousBase);
+         UnmapViewOfFile(b + kWriteCombineBase);
+     }
++#elif defined(__PROSPERO__)
++    void* p = nullptr;
++    if (ps5_vrange_reserve(size_t(size), reinterpret_cast<void*>(0x100000000ull), ps5::kHostPage, &p) == 0 && p) {
++        uint8_t* b = static_cast<uint8_t*>(p);
++        void* first = nullptr;
++        void* second = nullptr;
++        bool ok = ps5_shm_create(kMappedPhysical, &ps5::g_ram) == 0;
++        ok = ok && ps5_shm_map(&ps5::g_ram, 0, kMappedPhysical, b + kContiguousBase, PS5_SHM_READ | PS5_SHM_WRITE,
++                               PS5_SHM_FIXED, &first) == 0 && first == b + kContiguousBase;
++        ok = ok && ps5_shm_map(&ps5::g_ram, 0, kMappedPhysical, b + kWriteCombineBase, PS5_SHM_READ | PS5_SHM_WRITE,
++                               PS5_SHM_FIXED, &second) == 0 && second == b + kWriteCombineBase;
++        if (ok) {
++            std::memset(first, 0, kMappedPhysical);  // direct memory can come back holding another process's data
++            ps5::g_mapped.assign(size_t(size / ps5::kHostPage), 0);
++            g_base = b;
++        } else {
++            LOGE("memory: the physical windows could not be mapped");
++            ps5_vrange_release(p, size_t(size));
++        }
++    }
+ #else
+     void* p = mmap(reinterpret_cast<void*>(0x100000000ull), size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+     g_base = p == MAP_FAILED ? nullptr : static_cast<uint8_t*>(p);
+@@ -84,6 +151,13 @@
+         LOGE("memory: commit %08X+%X failed", first, uint32_t(end - first));
+         return false;
+     }
++#elif defined(__PROSPERO__)
++    for (uint64_t hp = first / ps5::kHostPage; hp * ps5::kHostPage < end; hp++) {
++        if (ps5::g_mapped[size_t(hp)] || ps5::MapChunk(hp)) continue;
++        LOGE("memory: commit %08X+%X failed at host page %08llX", first, uint32_t(end - first),
++             (unsigned long long)(hp * ps5::kHostPage));
++        return false;
++    }
+ #else
+     if (mprotect(g_base + first, size_t(end - first), PROT_READ | PROT_WRITE)) {
+         LOGE("memory: commit %08X+%X failed", first, uint32_t(end - first));
+@@ -101,6 +175,17 @@
+     std::lock_guard<std::recursive_mutex> lock(g_lock);
+ #ifdef _WIN32
+     VirtualFree(g_base + first, size_t(end - first), MEM_DECOMMIT);
++#elif defined(__PROSPERO__)
++    // the guest pages read as zero when committed again; a host page is released once none of its four is committed
++    for (uint64_t p = first; p < end; p += kPage) {
++        if (!g_committed[size_t(p >> 12)]) continue;
++        if (ps5::g_mapped[size_t(p / ps5::kHostPage)]) std::memset(g_base + p, 0, kPage);
++        g_committed[size_t(p >> 12)] = 0;
++    }
++    for (uint64_t hp = first / ps5::kHostPage; hp * ps5::kHostPage < end; hp++) {
++        size_t g = size_t(hp * (ps5::kHostPage / kPage));
++        if (!g_committed[g] && !g_committed[g + 1] && !g_committed[g + 2] && !g_committed[g + 3]) ps5::UnmapChunk(hp);
++    }
+ #else
+     madvise(g_base + first, size_t(end - first), MADV_DONTNEED);
+     mprotect(g_base + first, size_t(end - first), PROT_NONE);
+diff -ruN a/sdk/runtime/kernel/threads.cpp b/sdk/runtime/kernel/threads.cpp
+--- a/sdk/runtime/kernel/threads.cpp	2026-11-07 15:26:12.363531140 -0300
++++ b/sdk/runtime/kernel/threads.cpp	2026-11-07 15:26:18.019034389 -0300
+@@ -12,6 +12,10 @@
+ #include <windows.h>
+ #else
+ #include <pthread.h>
++#ifdef __PROSPERO__
++#include <pthread_np.h>  // FreeBSD's names: pthread_set_name_np, cpuset_t
++#include <sys/cpuset.h>
++#endif
+ #endif
+ 
+ namespace kernel {
+@@ -91,6 +95,8 @@
+     using Fn = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+     static Fn set = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription")));
+     if (set) set(GetCurrentThread(), w);
++#elif defined(__PROSPERO__)
++    pthread_set_name_np(pthread_self(), name);
+ #else
+     pthread_setname_np(pthread_self(), name);
+ #endif
+@@ -103,6 +109,12 @@
+     if (!m) return;
+ #ifdef _WIN32
+     SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR(m));
++#elif defined(__PROSPERO__)
++    cpuset_t set;
++    CPU_ZERO(&set);
++    for (int i = 0; i < 16; i++)  // a PS5 title sees at most 16 hardware threads
++        if (m >> i & 1) CPU_SET(i, &set);
++    pthread_setaffinity_np(pthread_self(), sizeof set, &set);
+ #else
+     cpu_set_t set;
+     CPU_ZERO(&set);
+diff -ruN a/src/game/rotk_fonts.cpp b/src/game/rotk_fonts.cpp

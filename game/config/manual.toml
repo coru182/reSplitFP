@@ -1,0 +1,20 @@
+# Addresses proven by hand for TimeSplitters: Future Perfect (45410066), applied over xbe_symbols + XbSymbolDatabase
+[symbols]
+D3DDevice_GetVisibilityTestResult = 0x3D34C0  # XbSymbolDatabase; the lens flares, as in TS2
+D3DDevice_BeginVisibilityTest = 0x3D4250  # XbSymbolDatabase; pushes hardware commands when left recompiled
+D3DDevice_EndVisibilityTest = 0x3D42F0  # XbSymbolDatabase
+D3DDevice_SelectVertexShaderDirect = 0x3D5630  # XbSymbolDatabase
+D3DDevice_LoadVertexShaderProgram = 0x3D59E0  # XbSymbolDatabase
+D3DDevice_SetPixelShaderProgram = 0x3D92E0  # XbSymbolDatabase
+IDirectSoundBuffer_Pause = 0x407ABC  # XbSymbolDatabase
+CDirectSoundStream_SetMaxDistance = 0x408323  # IDirectSoundStream_SetMaxDistance 0x4085D9 calls it
+CDirectSoundStream_SetMinDistance = 0x40837D  # IDirectSoundStream_SetMinDistance 0x4085F1 calls it
+CDirectSoundStream_SetPosition = 0x4083D7  # IDirectSoundStream_SetPosition 0x408609 calls it
+CDirectSoundStream_SetRolloffCurve = 0x408442  # IDirectSoundStream_SetRolloffCurve 0x408632 jumps to it
+D3DDevice_BeginPush = 0x3D6660  # XbSymbolDatabase BeginPush_4: (count), SetStateVB then the push pointer; EndPush 0x3D6680
+XInputGetCapabilities = 0x46E195  # XbSymbolDatabase; the library asks the USB stack
+D3DDevice_UpdateOverlay = 0x3D9810  # XbSymbolDatabase; writes the video scaler's registers (the XMV player, 0x30280)
+D3DDevice_GetOverlayUpdateStatus = 0x3D97F0  # XbSymbolDatabase; device +0x2410 != +0x1DE8
+[data]
+D3D_DefaultVertexShader = 0x3E2D80  # the console CreateDevice (0x3DB09B) points the device at it; the host's clears it
+D3D_DeviceVertexShaderField = 0x794  # the current vertex shader, read at +4 by library code (0x3D5C50) left recompiled

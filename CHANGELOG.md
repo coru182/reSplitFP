@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.4
+
+- **Invisible players, broken hands, lighting that changes as you move.** Future Perfect picks "the vertex program
+  at slot 0" first and loads the program into slot 0 afterwards. The GPU draws with whatever the slots hold when it
+  draws; the port took the program at the moment it was picked, so it drew with the one loaded there before. For the
+  animated models (the other players, the enemies, your own hands) that was a program with no skeleton: the
+  players vanished (only their guns showed), the hands came apart into floating shapes, and lit models took the
+  previous model's lighting. The picked program is now taken again whenever a load changes the slots it runs from.
+
 ## 0.1.3
 
 - **PlayStation buttons.** The game's Xbox buttons are drawn as PlayStation ones everywhere it shows them (menus,

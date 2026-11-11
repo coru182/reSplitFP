@@ -60,9 +60,40 @@ diff -ruN -x '*.o' -x __pycache__ sdk/harness/null_backend.cpp /home/claude/tsfp
 +}
  
  }  // namespace gpu
+diff -ruN -x '*.o' -x __pycache__ sdk/harness/pad_script.cpp /home/claude/tsfp/port/sdk/harness/pad_script.cpp
+--- a/sdk/harness/pad_script.cpp	2026-11-10 01:22:43.113517481 -0300
++++ b/sdk/harness/pad_script.cpp	2026-11-11 01:34:41.641414936 -0300
+@@ -3,7 +3,7 @@
+ // SCRIPT file: lines of "frame buttons [frames held]", held 8 frames by default, # comments; buttons joined by +:
+ // UP DOWN LEFT RIGHT START BACK A B X Y BLACK WHITE LT RT LS LSD LSL LSR (left stick up, down, left, right)
+ // RSU RSD RSL RSR (right stick up, down, left, right)
+-// cmd in the run folder: "buttons [frames held]" pressed once from the frame it is read, then removed
++// cmd in the run folder: "buttons [frames held]" pressed once from the frame it is read, then removed (cmd2: pad 1)
+ #include <cstdio>
+ #include <string>
+ #include <vector>
+@@ -93,8 +93,18 @@
+             if (t >= s.at && t <= s.at + s.len) Apply(s.buttons, p);
+         if (live.at >= 0 && t >= live.at && t <= live.at + live.len) Apply(live.buttons, p);
+     } else if (port == 1 && second) {
++        static Press live2{-1, "", 0};
++        std::string cmd = (app::ExeDir() / "cmd2").string();  // cmd2: as cmd, for pad 1
++        if (FILE* f = std::fopen(cmd.c_str(), "r")) {
++            char b[64] = {};
++            double len = 3;
++            if (std::fscanf(f, "%63s %lf", b, &len) >= 1) live2 = {t, b, len};
++            std::fclose(f);
++            std::remove(cmd.c_str());
++        }
+         for (const Press& s : script2)
+             if (t >= s.at && t <= s.at + s.len) Apply(s.buttons, p);
++        if (live2.at >= 0 && t >= live2.at && t <= live2.at + live2.len) Apply(live2.buttons, p);
+     }
+     if (app::kGame.pad) app::kGame.pad(port, p);
+     return p;
 diff -ruN -x '*.o' -x __pycache__ sdk/harness/reference_renderer.cpp /home/claude/tsfp/port/sdk/harness/reference_renderer.cpp
 --- a/sdk/harness/reference_renderer.cpp	2026-11-10 01:22:43.113646115 -0300
-+++ b/sdk/harness/reference_renderer.cpp	2026-11-11 00:45:30.696208420 -0300
++++ b/sdk/harness/reference_renderer.cpp	2026-11-11 02:16:42.099330536 -0300
 @@ -508,6 +508,7 @@
  
  struct Fragment {
@@ -721,7 +752,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/kernel/threads.cpp /home/claude/ts
  
 diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/port/sdk/runtime/xdk/d3d8.cpp
 --- a/sdk/runtime/xdk/d3d8.cpp	2026-11-10 01:22:43.409724643 -0300
-+++ b/sdk/runtime/xdk/d3d8.cpp	2026-11-11 00:33:10.503468337 -0300
++++ b/sdk/runtime/xdk/d3d8.cpp	2026-11-11 02:07:19.352820767 -0300
 @@ -72,6 +72,14 @@
  #define SYM_D3DDevice_EndPush FFFFFE01
  #define HAS_D3DDevice_EndPush 0
@@ -1205,19 +1236,41 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
              done = true;
          }
      }
-@@ -1297,8 +1558,60 @@
+@@ -1297,8 +1558,82 @@
  // every draw goes to the backend through here: whether the state is the draw before's (gpu::g_draw_same_state, for
  // D3D12's repeat path), on this thread; the threaded renderer works that out itself
  uint64_t g_last_draw_gen = ~0ull;
 +// the pushed arrays as the draw's inputs: register r reads stream r, a vertex buffer header pointing at its array
 +// with its stride; the bound program stays. Headers and declarations are kept, one a register and one a set of
 +// formats for each program.
++// A shader made from another (pushed arrays, inline vertices), kept by the address of the one it was made from: the
++// one it was made from is checked to be the same object still. Selections come and go with every program load (the
++// slot model), and a new one often lands where a freed one was: Future Perfect's models then drew with whatever
++// program that one had (the reflective debris' on the walls and floor, a different one every few frames: textures
++// that changed and flickered as the player moved)
++struct Derived {
++    std::weak_ptr<gpu::VertexShader> from;
++    std::shared_ptr<gpu::VertexShader> vs;
++};
++template <class Key>
++std::shared_ptr<gpu::VertexShader>& DerivedShader(std::map<Key, Derived>& made, const Key& key,
++                                                  const std::shared_ptr<gpu::VertexShader>& from) {
++    if (made.size() >= 4096)  // the ones made from shaders that are gone
++        for (auto it = made.begin(); it != made.end();) it = it->second.from.expired() ? made.erase(it) : std::next(it);
++    Derived& d = made[key];
++    if (d.from.expired() || d.from.lock() != from) {
++        d.from = from;
++        d.vs = nullptr;
++    }
++    return d.vs;
++}
++
 +void UsePushedArrays() {
 +    static uint32_t headers[16] = {};
-+    static std::map<std::pair<const gpu::VertexShader*, uint64_t>, std::shared_ptr<gpu::VertexShader>> made;
++    static std::map<std::pair<const gpu::VertexShader*, uint64_t>, Derived> made;
 +    uint64_t key = 0xCBF29CE484222325ull;
 +    for (uint32_t r = 0; r < 16; r++) key = (key ^ (g_state.simple[(0x1760 >> 2) + r] & 0xFF)) * 0x100000001B3ull;
-+    auto& vs = made[{g_state.vs.get(), key}];
++    auto& vs = DerivedShader(made, std::make_pair(static_cast<const gpu::VertexShader*>(g_state.vs.get()), key), g_state.vs);
 +    if (!vs) {
 +        vs = std::make_shared<gpu::VertexShader>(*g_state.vs);
 +        vs->hash = 0;
@@ -1267,7 +1320,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
      if (RenderThread()) {
          g_backend->Draw(g_state, prim, start, count, indices);
          return;
-@@ -1356,6 +1669,7 @@
+@@ -1356,6 +1691,7 @@
  
  void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride) {
      if (!g_backend || !count || !stride) return;
@@ -1275,7 +1328,18 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
      if (uint64_t(count) * stride > kUpHalf) {  // more than the ring holds: not drawn, rather than from stale bytes
          LOG_FIRST(4, "d3d: DrawVerticesUP of %u bytes skipped (more than %u)", count * stride, kUpHalf);
          return;
-@@ -1550,6 +1864,11 @@
+@@ -1478,8 +1814,8 @@
+         // inline vertices carry every input the shader reads, packed in register order, whatever stream it names
+         uint32_t bytes = uint32_t(g_arr_inline.size()) * 4;
+         if (g_state.vs_handle & 1 && g_state.vs) {
+-            static std::map<gpu::VertexShader*, std::shared_ptr<gpu::VertexShader>> packed_of;
+-            auto& packed = packed_of[g_state.vs.get()];
++            static std::map<gpu::VertexShader*, Derived> packed_of;
++            auto& packed = DerivedShader(packed_of, g_state.vs.get(), g_state.vs);
+             if (!packed) {
+                 packed = std::make_shared<gpu::VertexShader>(*g_state.vs);
+                 packed->stream_stride = {};
+@@ -1550,6 +1886,11 @@
              p += n * 4;
              continue;
          }
@@ -1287,7 +1351,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
          if (method >= 0x0B80 && method < 0x0C00 && ((head & 0x40000000) || method + n * 4 <= 0x0C00)) {  // constants
              constexpr uint32_t kSlots = sizeof(g_state.vsc) / 4;
              if (g_vsc_load < kSlots) {
-@@ -1601,6 +1920,12 @@
+@@ -1601,6 +1942,12 @@
                  if (g_vsc_load / 4 < 192) std::memcpy(&g_state.vsc[g_vsc_load / 4][g_vsc_load % 4], &v, 4);
                  g_vsc_load++;
                  continue;
@@ -1300,7 +1364,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
              } else if (m >= 0x1880 && m < 0x1900) {  // 2 floats, z = 0 and w = 1
                  a += (m - 0x1880) / 8 * 4;
                  last = (m - 0x1880) / 4 & 1;
-@@ -1637,6 +1962,7 @@
+@@ -1637,6 +1984,7 @@
          }
      }
      g_walk = end;
@@ -1308,7 +1372,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
  }
  }  // namespace
  }  // namespace d3d
-@@ -1727,12 +2053,24 @@
+@@ -1727,12 +2075,24 @@
              uint32_t m = head & 0x40000000 ? method : method + i * 4, v = R32(p);
              if (m == kInlineArray) {
                  if (prim) vertices.push_back(v);
@@ -1333,7 +1397,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
              } else if (v) {
                  prim = v;
                  vertices.clear();
-@@ -1747,6 +2085,7 @@
+@@ -1747,6 +2107,7 @@
              }
          }
      }

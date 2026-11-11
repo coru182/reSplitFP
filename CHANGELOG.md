@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.5
+
+- **Textures that flickered and changed with the player's movement.** Future Perfect draws its models with vertex
+  arrays it pushes itself; the port makes a shader for each such draw from the selected program, and kept those by
+  the address of the selection they were made from. Since 0.1.3 a selection is made anew whenever a load changes the
+  slots it runs from, and a new one often took the memory of one just freed: the draw then got the shader made for
+  the old one, with its program. Walls and floor were drawn with the reflective debris' program now and then, a
+  different set of draws every few frames, worst in split screen. A shader made from another is now checked to come
+  from that same selection still.
+
 ## 0.1.4
 
 - **Invisible players, broken hands, lighting that changes as you move.** Future Perfect picks "the vertex program

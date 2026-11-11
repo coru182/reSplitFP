@@ -56,6 +56,7 @@ const std::vector<Item>& Items() {
         {"graphics.anisotropic_filtering", 0},
         {"graphics.lod_bias", 0},
         {"graphics.smooth_2d", 0},
+        {"input.left_trigger_aims", 1},
         {"input.vibration", 1},
         {"input.stick_deadzone", 1},
         {"input.trigger_threshold", 1},

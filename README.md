@@ -93,6 +93,12 @@ game is missing, damaged, or another game or release, a screen says so: press Cr
 | Start / Back | Options / touchpad click |
 | | **L3 + R3:** the settings menu |
 
+**L2 aims, R2 fires.** The Xbox game throws a grenade with the left trigger and aims with a click of the right stick;
+here L2 and R3 trade places, so L2 aims and R3 throws a grenade. Set the game's **Controls > Aim Mode** to **Hold** to
+aim only while L2 is held. The game's Controls screen still shows its own layout: its left trigger line (Throw
+grenade) is R3 now, and its right stick click line (Aim) is L2. **Left trigger aims** in the settings menu (Controls
+page) turns this off, for the Xbox layout.
+
 Player 1 is the user who started the app. Players 2 to 4 are the other signed-in users whose controllers are on, in
 the order the PS5 lists them.
 
@@ -104,7 +110,7 @@ Circle, Options or L3 + R3 go back to the game. Changes apply at once and are sa
 | Page | Settings |
 | --- | --- |
 | **Picture** | Render resolution (1080p, 1620p, 4K), V-Sync, frame rate counter, texture filtering (16x by default) and sharpness, smooth menus and HUD |
-| **Controls** | Vibration, stick deadzone, trigger threshold |
+| **Controls** | Left trigger aims, vibration, stick deadzone, trigger threshold |
 
 ## Your files
 

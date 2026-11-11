@@ -62,17 +62,29 @@ diff -ruN -x '*.o' -x __pycache__ sdk/harness/null_backend.cpp /home/claude/tsfp
  }  // namespace gpu
 diff -ruN -x '*.o' -x __pycache__ sdk/harness/pad_script.cpp /home/claude/tsfp/port/sdk/harness/pad_script.cpp
 --- a/sdk/harness/pad_script.cpp	2026-11-10 01:22:43.113517481 -0300
-+++ b/sdk/harness/pad_script.cpp	2026-11-11 01:34:41.641414936 -0300
-@@ -3,7 +3,7 @@
++++ b/sdk/harness/pad_script.cpp	2026-11-11 02:32:38.731917512 -0300
+@@ -1,9 +1,9 @@
+ // pad 0 from a script (SCRIPT), pad 1 from a second one (SCRIPT2: plugged in only then), then GameInfo::pad as on
+ // Windows
  // SCRIPT file: lines of "frame buttons [frames held]", held 8 frames by default, # comments; buttons joined by +:
- // UP DOWN LEFT RIGHT START BACK A B X Y BLACK WHITE LT RT LS LSD LSL LSR (left stick up, down, left, right)
+-// UP DOWN LEFT RIGHT START BACK A B X Y BLACK WHITE LT RT LS LSD LSL LSR (left stick up, down, left, right)
++// UP DOWN LEFT RIGHT START BACK A B X Y BLACK WHITE LT RT L3 R3 LS LSD LSL LSR (left stick up, down, left, right)
  // RSU RSD RSL RSR (right stick up, down, left, right)
 -// cmd in the run folder: "buttons [frames held]" pressed once from the frame it is read, then removed
 +// cmd in the run folder: "buttons [frames held]" pressed once from the frame it is read, then removed (cmd2: pad 1)
  #include <cstdio>
  #include <string>
  #include <vector>
-@@ -93,8 +93,18 @@
+@@ -52,6 +52,8 @@
+         else if (b == "RIGHT") p.buttons |= 8;
+         else if (b == "START") p.buttons |= 16;
+         else if (b == "BACK") p.buttons |= 32;
++        else if (b == "L3") p.buttons |= 64;   // the stick clicks
++        else if (b == "R3") p.buttons |= 128;
+         else if (b == "A") p.analog[0] = 255;
+         else if (b == "B") p.analog[1] = 255;
+         else if (b == "X") p.analog[2] = 255;
+@@ -93,8 +95,18 @@
              if (t >= s.at && t <= s.at + s.len) Apply(s.buttons, p);
          if (live.at >= 0 && t >= live.at && t <= live.at + live.len) Apply(live.buttons, p);
      } else if (port == 1 && second) {

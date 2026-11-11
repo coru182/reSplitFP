@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.6
+
+- **L2 aims, R2 fires.** The Xbox game threw a grenade with the left trigger and aimed with a click of the right
+  stick. Now L2 aims and R2 fires, as reSplit2 does for TimeSplitters 2; clicking the right stick throws the grenade,
+  so nothing is lost. The game's Aim Mode stands: Toggle (its default) turns aiming on and off with each press of L2,
+  Hold aims while L2 is held. The settings menu's **Left trigger aims** (Controls page) turns it off, for the Xbox
+  layout. The game's own Controls screen shows its layout as it always did (Throw grenade on the left trigger, Aim on
+  the right stick's click); those two lines are R3 and L2 now.
+- What reSplit2 needed and Future Perfect does not: the game already waits for the next 60 Hz blank before each
+  frame (its own frame timer), so it keeps its speed on any TV or with V-Sync off, and it has no one-pixel soft filter
+  to take out.
+
 ## 0.1.5
 
 - **Textures that flickered and changed with the player's movement.** Future Perfect draws its models with vertex

@@ -1,4 +1,4 @@
-reSplitFP 0.1.5 - TimeSplitters: Future Perfect (US Xbox), recompiled for the PS5
+reSplitFP 0.1.6 - TimeSplitters: Future Perfect (US Xbox), recompiled for the PS5
 =================================================================================
 
 A first test build. An unofficial fan port: the original Xbox game's code, statically recompiled into a native PS5
@@ -45,6 +45,11 @@ users on the PS5 (guests are enough) and turn on their controllers.
   Stick clicks    L3 / R3
   Start / Back    Options / touchpad click
 
+L2 aims and R2 fires: L2 and R3 trade places, so R3 throws a grenade (the Xbox game threw it with the left trigger
+and aimed with R3). Set the game's Controls > Aim Mode to Hold to aim only while L2 is held. The game's Controls
+screen still shows its own layout: its left trigger line is R3 now, and its right stick click line (Aim) is L2.
+"Left trigger aims" in the in-game menu turns this off.
+
 The game runs in its own widescreen mode, full screen at 16:9.
 
 The game shows PlayStation buttons (Cross, Circle, Square, Triangle, L1/R1, L2/R2), a PlayStation controller in
@@ -57,7 +62,7 @@ Cross to choose, L1 / R1 to change page, and Circle, Options or L3 + R3 to go ba
 
   Picture   render resolution (1080p, 1620p, 4K), V-Sync, frame rate counter, texture filtering (16x by default)
             and sharpness, smooth menus and HUD
-  Controls  vibration, stick deadzone, trigger threshold
+  Controls  left trigger aims, vibration, stick deadzone, trigger threshold
 
 Changes apply at once and are saved when you close the menu.
 

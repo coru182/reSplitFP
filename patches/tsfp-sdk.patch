@@ -1,6 +1,40 @@
-diff -ruN a/sdk/harness/null_backend.cpp b/sdk/harness/null_backend.cpp
+diff -ruN -x '*.o' -x __pycache__ sdk/harness/app_headless.cpp /home/claude/tsfp/port/sdk/harness/app_headless.cpp
+--- a/sdk/harness/app_headless.cpp	2026-11-10 01:22:43.112846529 -0300
++++ b/sdk/harness/app_headless.cpp	2026-11-10 22:05:06.595949716 -0300
+@@ -1,3 +1,4 @@
++#include <cstdio>
+ // the host side without a window: settings from settings.toml in the run folder when there is one (else the
+ // defaults), the run folder as the exe folder
+ #include <algorithm>
+@@ -23,9 +24,23 @@
+     if (!cfg::Read(SettingsFile().string(), SettingsList(), error)) LOGE("settings: %s", error.c_str());
+ }
+ void Save() {}
+-Mode Desktop() { return {1280, 720}; }
++// OUTPUT=3840x2160 and RENDER_SCALE=4.5 (in the environment): a console's output and render scale (the PS5's 4K)
++Mode Desktop() {
++    static const Mode m = [] {
++        unsigned w = 1280, h = 720;
++        if (const char* e = std::getenv("OUTPUT")) std::sscanf(e, "%ux%u", &w, &h);
++        return Mode{w, h};
++    }();
++    return m;
++}
+ Mode Output() { return Desktop(); }
+-float RenderScale(uint32_t) { return 1.0f; }
++float RenderScale(uint32_t) {
++    static const float s = [] {
++        const char* e = std::getenv("RENDER_SCALE");
++        return e ? std::max(1.0f, float(std::atof(e))) : 1.0f;
++    }();
++    return s;
++}
+ // WIDESCREEN=0 in the environment: the console's 4:3 (default: a widescreen display, as on a wide monitor)
+ bool Widescreen() {
+     static const bool wide = [] {
+diff -ruN -x '*.o' -x __pycache__ sdk/harness/null_backend.cpp /home/claude/tsfp/port/sdk/harness/null_backend.cpp
 --- a/sdk/harness/null_backend.cpp	2026-11-10 01:22:43.113466215 -0300
-+++ b/sdk/harness/null_backend.cpp	2026-11-08 20:58:13.000000000 -0300
++++ b/sdk/harness/null_backend.cpp	2026-11-10 21:56:21.678187089 -0300
 @@ -319,7 +319,9 @@
              // the vertex buffer's Data at +4 is a physical address
              uint32_t data = mem::VirtualFromPhysical(kernel::R32(s.streams[0].vb + 4)) + start * s.streams[0].stride;
@@ -12,7 +46,21 @@ diff -ruN a/sdk/harness/null_backend.cpp b/sdk/harness/null_backend.cpp
                  std::fprintf(f, "  v%u stride %u:", k, s.streams[0].stride);
                  for (uint32_t i = 0; i < s.streams[0].stride / 4 && i < 10; i++) {
                      uint32_t v = kernel::R32(data + k * s.streams[0].stride + i * 4);
-diff -ruN a/sdk/harness/reference_renderer.cpp b/sdk/harness/reference_renderer.cpp
+@@ -343,6 +345,12 @@
+ 
+ }  // namespace
+ 
+-std::unique_ptr<Backend> CreateBackend() { return std::make_unique<NullBackend>(); }
++// a harness build may bring a real backend (harness-extra: Vulkan on lavapipe); null when it doesn't take over
++std::unique_ptr<Backend> HarnessBackend() __attribute__((weak));
++std::unique_ptr<Backend> CreateBackend() {
++    if (HarnessBackend)
++        if (auto b = HarnessBackend()) return b;
++    return std::make_unique<NullBackend>();
++}
+ 
+ }  // namespace gpu
+diff -ruN -x '*.o' -x __pycache__ sdk/harness/reference_renderer.cpp /home/claude/tsfp/port/sdk/harness/reference_renderer.cpp
 --- a/sdk/harness/reference_renderer.cpp	2026-11-10 01:22:43.113646115 -0300
 +++ b/sdk/harness/reference_renderer.cpp	2026-11-10 01:14:43.608401353 -0300
 @@ -508,6 +508,7 @@
@@ -94,7 +142,7 @@ diff -ruN a/sdk/harness/reference_renderer.cpp b/sdk/harness/reference_renderer.
                          }
                      rt.Store(uint32_t(x), uint32_t(y), col, cmask);
                  }
-diff -ruN a/sdk/runtime/gpu/shaders.cpp b/sdk/runtime/gpu/shaders.cpp
+diff -ruN -x '*.o' -x __pycache__ sdk/runtime/gpu/shaders.cpp /home/claude/tsfp/port/sdk/runtime/gpu/shaders.cpp
 --- a/sdk/runtime/gpu/shaders.cpp	2026-11-10 01:22:43.175834526 -0300
 +++ b/sdk/runtime/gpu/shaders.cpp	2026-11-10 01:14:43.607264609 -0300
 @@ -261,7 +261,10 @@
@@ -127,18 +175,107 @@ diff -ruN a/sdk/runtime/gpu/shaders.cpp b/sdk/runtime/gpu/shaders.cpp
      }
      body += "outc.a = alphatest(outc.a);\n" + Hooks().Output() + "return outc;\n}\n";
      s += body;
-diff -ruN a/sdk/runtime/gpu/vk.cpp b/sdk/runtime/gpu/vk.cpp
+diff -ruN -x '*.o' -x __pycache__ sdk/runtime/gpu/spirv.cpp /home/claude/tsfp/port/sdk/runtime/gpu/spirv.cpp
+--- a/sdk/runtime/gpu/spirv.cpp	2026-11-10 01:22:43.176245346 -0300
++++ b/sdk/runtime/gpu/spirv.cpp	2026-11-10 22:10:53.715076469 -0300
+@@ -1,5 +1,8 @@
+ #include "gpu/spirv.h"
+ 
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
+ #include <mutex>
+ 
+ // glslang's headers hide the HLSL calls (setHlslIoMapping) unless this is set; its own build sets it for itself only
+@@ -58,6 +61,19 @@
+         error = log.empty() ? "no SPIR-V produced" : log;
+         return false;
+     }
++    // XBE_SPV_DUMP=<folder> (diagnostics): each module as <folder>/<n>.{vert,frag}.spv with its HLSL beside
++    if (static const char* dump = std::getenv("XBE_SPV_DUMP"); dump) {
++        static std::atomic<uint32_t> n{0};
++        std::string base = std::string(dump) + "/" + std::to_string(n++) + (stage == Stage::Vertex ? ".vert" : ".frag");
++        if (FILE* f = std::fopen((base + ".spv").c_str(), "wb")) {
++            std::fwrite(out.data(), 4, out.size(), f);
++            std::fclose(f);
++        }
++        if (FILE* f = std::fopen((base + ".hlsl").c_str(), "wb")) {
++            std::fwrite(hlsl.data(), 1, hlsl.size(), f);
++            std::fclose(f);
++        }
++    }
+     return true;
+ }
+ 
+diff -ruN -x '*.o' -x __pycache__ sdk/runtime/gpu/vk.cpp /home/claude/tsfp/port/sdk/runtime/gpu/vk.cpp
 --- a/sdk/runtime/gpu/vk.cpp	2026-11-10 01:22:43.424904355 -0300
-+++ b/sdk/runtime/gpu/vk.cpp	2026-11-08 21:08:24.000000000 -0300
-@@ -15,6 +15,7 @@
++++ b/sdk/runtime/gpu/vk.cpp	2026-11-10 22:23:06.266807147 -0300
+@@ -15,7 +15,9 @@
  #include <cmath>
  #include <cstring>
  #include <filesystem>
 +#include <mutex>
  #include <string>
++#include <thread>
  #include <unordered_map>
  #include <unordered_set>
-@@ -101,7 +102,15 @@
+ #include <vector>
+@@ -29,8 +31,10 @@
+ #ifdef _WIN32
+ #include <backends/imgui_impl_win32.h>
+ #define GPU_VK_SURFACE_EXTENSION VK_KHR_WIN32_SURFACE_EXTENSION_NAME
+-#else
++#elif defined(__PROSPERO__)
+ #define GPU_VK_SURFACE_EXTENSION VK_KHR_DISPLAY_EXTENSION_NAME  // PS5: VideoOut through VK_KHR_display
++#else
++#define GPU_VK_SURFACE_EXTENSION VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME  // Linux: the test harness (lavapipe)
+ #endif
+ 
+ #include "app/app.h"
+@@ -56,6 +60,42 @@
+ 
+ using namespace gpu::vk;
+ 
++// The stall report: a thread of its own logs, once, when no frame has been shown for 5 seconds, and what the renderer
++// is waiting on then (the GPU's fence, the next screen image, the queue), or that it waits on nothing: the game
++// itself stopped presenting. A frozen or black screen then says in the log which side stopped.
++std::atomic<int64_t> g_last_frame_ms{0};
++std::atomic<const char*> g_waiting{nullptr};
++int64_t NowMs() {
++    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++struct Waiting {
++    explicit Waiting(const char* what) { g_waiting = what; }
++    ~Waiting() { g_waiting = nullptr; }
++};
++void StartStallReport() {
++    static std::once_flag once;
++    std::call_once(once, [] {
++        std::thread([] {
++            bool told = false;
++            for (;;) {
++                std::this_thread::sleep_for(std::chrono::seconds(1));
++                int64_t last = g_last_frame_ms.load();
++                if (!last) continue;
++                int64_t idle = NowMs() - last;
++                if (idle >= 5000 && !told) {
++                    const char* w = g_waiting.load();
++                    LOGE("vulkan: no frame shown for %lld s: %s", (long long)(idle / 1000),
++                         w ? w : "the renderer waits on nothing (the game has stopped presenting)");
++                    told = true;
++                } else if (idle < 5000 && told) {
++                    LOGE("vulkan: frames are shown again");
++                    told = false;
++                }
++            }
++        }).detach();
++    });
++}
++
+ constexpr uint32_t kFrames = 2;  // frames in flight
+ 
+ bool HasExtension(const std::vector<VkExtensionProperties>& list, const char* name) {
+@@ -101,7 +141,15 @@
      void SyncLate(uint32_t data) override { Sync(data, 0); }
      void Flush() override;
      void SetGamma(const uint8_t*) override { LOG_FIRST(1, "vulkan: SetGamma is not done yet"); }
@@ -155,7 +292,7 @@ diff -ruN a/sdk/runtime/gpu/vk.cpp b/sdk/runtime/gpu/vk.cpp
  
  private:
      bool Fail(const std::string& why) {
-@@ -300,6 +309,39 @@
+@@ -300,6 +348,39 @@
      bool anisotropy_ = false;  // the card's samplerAnisotropy, asked for at device creation
      bool fill_lines_ = false;  // fillModeNonSolid: wireframe
      Image dummy_[4];           // 2D, cube, 3D, depth
@@ -195,7 +332,34 @@ diff -ruN a/sdk/runtime/gpu/vk.cpp b/sdk/runtime/gpu/vk.cpp
      VkBuffer readback_ = VK_NULL_HANDLE;  // Sync's, host visible, grown as needed
      VkDeviceMemory readback_mem_ = VK_NULL_HANDLE;
      uint8_t* readback_cpu_ = nullptr;
-@@ -542,6 +584,8 @@
+@@ -370,14 +451,24 @@
+     LoadInstance(instance_);
+ #ifdef _WIN32
+     if (!vkCreateWin32SurfaceKHR || !vkEnumeratePhysicalDevices || !vkGetDeviceProcAddr)
+-#else
++#elif defined(__PROSPERO__)
+     if (!vkCreateDisplayPlaneSurfaceKHR || !vkEnumeratePhysicalDevices || !vkGetDeviceProcAddr)
++#else
++    if (!vkCreateHeadlessSurfaceEXT || !vkEnumeratePhysicalDevices || !vkGetDeviceProcAddr)
+ #endif
+         return Fail("the instance functions could not be loaded");
+     return true;
+ }
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__PROSPERO__)
++// Linux: the test harness, a surface with no window (VK_EXT_headless_surface, as lavapipe has)
++bool VkBackend::CreateSurface() {
++    VkHeadlessSurfaceCreateInfoEXT ci{VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT};
++    VkResult r = vkCreateHeadlessSurfaceEXT(instance_, &ci, nullptr, &surface_);
++    if (r != VK_SUCCESS) return Fail("vkCreateHeadlessSurfaceEXT", r);
++    return true;
++}
++#elif !defined(_WIN32)
+ // PS5: the console's one GPU and VideoOut's one display. The mode closest to app::Output() (4K by default) on the
+ // first plane that can show that display; the same steps as reUndr's SDL_ps5vulkan.c (MIT, bystritskiy).
+ bool VkBackend::CreateSurface() {
+@@ -542,6 +633,8 @@
      fill_lines_ = have.features.fillModeNonSolid;
      on.features.samplerAnisotropy = have.features.samplerAnisotropy;
      on.features.fillModeNonSolid = have.features.fillModeNonSolid;
@@ -204,7 +368,7 @@ diff -ruN a/sdk/runtime/gpu/vk.cpp b/sdk/runtime/gpu/vk.cpp
      ubo_align_ = std::max<VkDeviceSize>(p.limits.minUniformBufferOffsetAlignment, 16);
  
      std::vector<const char*> names = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-@@ -752,6 +796,8 @@
+@@ -752,6 +845,8 @@
          for (auto& [key, pt] : pack_cache_) DestroyImage(pt.img);
          pack_cache_.clear();
          for (Image& im : dummy_) DestroyImage(im);
@@ -213,7 +377,20 @@ diff -ruN a/sdk/runtime/gpu/vk.cpp b/sdk/runtime/gpu/vk.cpp
          DestroyImage(scratch_);
          if (readback_) vkDestroyBuffer(device_, readback_, nullptr);
          if (readback_mem_) vkFreeMemory(device_, readback_mem_, nullptr);
-@@ -957,6 +1003,12 @@
+@@ -940,7 +1035,11 @@
+     if (lost_ || !device_) return VK_NULL_HANDLE;
+     Frame& f = frames_[frame_];
+     if (recording_) return f.cmd;
+-    VkResult r = vkWaitForFences(device_, 1, &f.done, VK_TRUE, UINT64_MAX);
++    VkResult r;
++    {
++        Waiting w("waiting for the GPU to finish a frame (a GPU hang?)");
++        r = vkWaitForFences(device_, 1, &f.done, VK_TRUE, UINT64_MAX);
++    }
+     if (r == VK_ERROR_DEVICE_LOST) {
+         lost_ = true;
+         app::Fail(app::kExitGpuLost, L"The graphics driver stopped responding (Vulkan device lost).");
+@@ -957,6 +1056,12 @@
      bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
      vkBeginCommandBuffer(f.cmd, &bi);
      recording_ = true;
@@ -226,7 +403,7 @@ diff -ruN a/sdk/runtime/gpu/vk.cpp b/sdk/runtime/gpu/vk.cpp
      return f.cmd;
  }
  
-@@ -979,8 +1031,12 @@
+@@ -979,8 +1084,12 @@
          LOG_FIRST(4, "vulkan: vkQueueSubmit failed (%s)", ResultName(r));
          return;
      }
@@ -241,7 +418,7 @@ diff -ruN a/sdk/runtime/gpu/vk.cpp b/sdk/runtime/gpu/vk.cpp
  }
  
  void VkBackend::Flush() { Submit(true); }
-@@ -1044,11 +1100,13 @@
+@@ -1044,11 +1153,13 @@
      if (ds) ds->drawn = true;
      render_rt_ = rt;
      render_ds_ = ds;
@@ -255,7 +432,65 @@ diff -ruN a/sdk/runtime/gpu/vk.cpp b/sdk/runtime/gpu/vk.cpp
      vkCmdEndRenderingKHR(frames_[frame_].cmd);
      rendering_ = false;
      render_rt_ = render_ds_ = nullptr;
-@@ -2723,6 +2781,116 @@
+@@ -1401,7 +1512,9 @@
+     ci.mipLevels = 1;
+     ci.arrayLayers = layers;
+     ci.samples = VK_SAMPLE_COUNT_1_BIT;
+-    ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++    // a depth placeholder waits in DEPTH_STENCIL_READ_ONLY_OPTIMAL, a layout for depth attachments
++    ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
++               (depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : 0);
+     if (!MakeImage(im, ci, view, depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT)) return false;
+     VkCommandBuffer cb = Cmd();
+     if (!cb) return false;
+@@ -2408,7 +2521,8 @@
+     ci.mipLevels = 1;
+     ci.arrayLayers = 1;
+     ci.samples = VK_SAMPLE_COUNT_1_BIT;
+-    ci.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++    // sampled as well: MakeImage gives it a view, which an image of copies alone may not have
++    ci.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+     if (!MakeImage(scratch_, ci, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT)) return false;
+     scratch_w_ = w;
+     scratch_h_ = h;
+@@ -2703,15 +2817,29 @@
+     VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+     VkImageLayout swap_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+     ToLayout(images_[index], false, swap_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+-    VkClearColorValue black{};
+-    black.float32[3] = 1.0f;
+-    vkCmdClearColorImage(cb, images_[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
++    float aspect = app::FrameAspect();
++    float sw = float(extent_.width), sh = float(extent_.height);
++    float w = std::min(sw, sh * aspect), h = std::min(sh, sw / aspect);
++    int32_t x0 = int32_t((sw - w) / 2), y0 = int32_t((sh - h) / 2);
++    // black bars, or the whole screen with no front buffer; a picture that fills the screen needs no clear
++    if (!front || x0 > 0 || y0 > 0 || int32_t(w) < int32_t(extent_.width) || int32_t(h) < int32_t(extent_.height)) {
++        VkClearColorValue black{};
++        black.float32[3] = 1.0f;
++        vkCmdClearColorImage(cb, images_[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
++        // the clear finished before the blit writes over it: without this a GPU may run them in either order (a
++        // black screen whenever the front buffer needed no barrier of its own: the same picture shown again)
++        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
++        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++        b.oldLayout = b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++        b.image = images_[index];
++        b.subresourceRange = range;
++        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
++                             nullptr, 1, &b);
++    }
+     if (front) {
+         ToLayout(front->image, false, front->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+-        float aspect = app::FrameAspect();
+-        float sw = float(extent_.width), sh = float(extent_.height);
+-        float w = std::min(sw, sh * aspect), h = std::min(sh, sw / aspect);
+-        int32_t x0 = int32_t((sw - w) / 2), y0 = int32_t((sh - h) / 2);
+         VkImageBlit blit{};
+         blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+         blit.srcOffsets[1] = {int32_t(front->w), int32_t(front->h), 1};
+@@ -2723,8 +2851,123 @@
      }
  }
  
@@ -370,12 +605,57 @@ diff -ruN a/sdk/runtime/gpu/vk.cpp b/sdk/runtime/gpu/vk.cpp
 +}
 +
  void VkBackend::Present(const Surface& front) {
-     if (lost_ || !device_) return;
+-    if (lost_ || !device_) return;
++    if (lost_ || !device_) {
++        static bool told = false;
++        if (!told) LOGE("vulkan: frames are no longer shown: %s", lost_ ? "the GPU stopped (device lost)" : "no device");
++        told = true;
++        return;
++    }
      {
-diff -ruN a/sdk/runtime/gpu/vk_loader.h b/sdk/runtime/gpu/vk_loader.h
+         // the frame rate every 5 seconds in the log, as the Direct3D 12 renderer writes it (side-by-side tests)
+         static auto fps_t = std::chrono::steady_clock::now();
+@@ -2760,7 +3003,11 @@
+     EndRendering();
+     Frame& f = frames_[frame_];
+     uint32_t index = 0;
+-    VkResult r = vkAcquireNextImageKHR(device_, swap_, UINT64_MAX, f.acquired, VK_NULL_HANDLE, &index);
++    VkResult r;
++    {
++        Waiting w("waiting for the next screen image (vkAcquireNextImageKHR)");
++        r = vkAcquireNextImageKHR(device_, swap_, UINT64_MAX, f.acquired, VK_NULL_HANDLE, &index);
++    }
+     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+         Submit(true);  // the frame's draws still run; the acquire semaphore was not signalled, so it stays usable
+         vkDeviceWaitIdle(device_);
+@@ -2806,7 +3053,12 @@
+     pi.swapchainCount = 1;
+     pi.pSwapchains = &swap_;
+     pi.pImageIndices = &index;
+-    r = vkQueuePresentKHR(queue_, &pi);
++    {
++        Waiting w("waiting to show the frame (vkQueuePresentKHR)");
++        r = vkQueuePresentKHR(queue_, &pi);
++    }
++    g_last_frame_ms = NowMs();
++    StartStallReport();
+     frame_ = (frame_ + 1) % kFrames;
+     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) {
+         vkDeviceWaitIdle(device_);
+diff -ruN -x '*.o' -x __pycache__ sdk/runtime/gpu/vk_loader.h /home/claude/tsfp/port/sdk/runtime/gpu/vk_loader.h
 --- a/sdk/runtime/gpu/vk_loader.h	2026-11-10 01:22:43.425257836 -0300
-+++ b/sdk/runtime/gpu/vk_loader.h	2026-11-08 21:08:24.000000000 -0300
-@@ -57,7 +57,7 @@
++++ b/sdk/runtime/gpu/vk_loader.h	2026-11-10 21:56:03.053299333 -0300
+@@ -33,7 +33,8 @@
+     X(vkGetPhysicalDeviceDisplayPlanePropertiesKHR) X(vkGetDisplayPlaneSupportedDisplaysKHR)                            \
+     X(vkGetDisplayPlaneCapabilitiesKHR) X(vkCreateDisplayPlaneSurfaceKHR)
+ #else
+-#define GPU_VK_INSTANCE_WIN32(X)
++// Linux: the test harness draws to a surface with no window
++#define GPU_VK_INSTANCE_WIN32(X) X(vkCreateHeadlessSurfaceEXT)
+ #endif
+ #define GPU_VK_DEVICE(X)                                                                                                \
+     X(vkDestroyDevice) X(vkGetDeviceQueue) X(vkDeviceWaitIdle) X(vkQueueSubmit) X(vkQueueWaitIdle)                      \
+@@ -57,7 +58,7 @@
      X(vkCmdClearAttachments) X(vkCmdResolveImage) X(vkCmdPipelineBarrier) X(vkCmdBeginQuery) X(vkCmdEndQuery)           \
      X(vkCmdResetQueryPool) X(vkCmdCopyQueryPoolResults) X(vkCmdPushConstants) X(vkCmdBeginRenderPass)                   \
      X(vkCmdEndRenderPass) X(vkCreateRenderPass) X(vkDestroyRenderPass) X(vkCreateFramebuffer) X(vkDestroyFramebuffer) \
@@ -384,9 +664,9 @@ diff -ruN a/sdk/runtime/gpu/vk_loader.h b/sdk/runtime/gpu/vk_loader.h
  
  #define GPU_VK_DECLARE(name) extern PFN_##name name;
  GPU_VK_GLOBAL(GPU_VK_DECLARE)
-diff -ruN a/sdk/runtime/xdk/d3d8.cpp b/sdk/runtime/xdk/d3d8.cpp
+diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/port/sdk/runtime/xdk/d3d8.cpp
 --- a/sdk/runtime/xdk/d3d8.cpp	2026-11-10 01:22:43.409724643 -0300
-+++ b/sdk/runtime/xdk/d3d8.cpp	2026-11-10 01:27:59.193383965 -0300
++++ b/sdk/runtime/xdk/d3d8.cpp	2026-11-10 22:09:01.956434578 -0300
 @@ -72,6 +72,14 @@
  #define SYM_D3DDevice_EndPush FFFFFE01
  #define HAS_D3DDevice_EndPush 0
@@ -696,7 +976,15 @@ diff -ruN a/sdk/runtime/xdk/d3d8.cpp b/sdk/runtime/xdk/d3d8.cpp
  }
  
  HLE_STDCALL(D3DDevice_SetPixelShaderConstant, 3) {
-@@ -1282,7 +1483,8 @@
+@@ -1263,6 +1464,7 @@
+ // visible, with D3DERR_TESTINCOMPLETE, so a flare or glow fades in rather than flashing on.
+ HLE_STDCALL(D3DDevice_BeginVisibilityTest, 0) {
+     DeviceLock lock;
++    LOG_FIRST(1, "d3d: the first visibility test");
+     SyncDeferred();
+     if (g_backend) g_backend->BeginQuery();
+     return 0;
+@@ -1282,7 +1484,8 @@
          // a backend without queries: everything visible, as before tests were counted
          done = g_backend && g_backend->QueryResult(a[0], pixels);
          if (!g_backend || !g_backend->Queries()) {
@@ -706,7 +994,7 @@ diff -ruN a/sdk/runtime/xdk/d3d8.cpp b/sdk/runtime/xdk/d3d8.cpp
              done = true;
          }
      }
-@@ -1297,8 +1499,57 @@
+@@ -1297,8 +1500,60 @@
  // every draw goes to the backend through here: whether the state is the draw before's (gpu::g_draw_same_state, for
  // D3D12's repeat path), on this thread; the threaded renderer works that out itself
  uint64_t g_last_draw_gen = ~0ull;
@@ -755,8 +1043,11 @@ diff -ruN a/sdk/runtime/xdk/d3d8.cpp b/sdk/runtime/xdk/d3d8.cpp
 +        auto streams = g_state.streams;
 +        auto bound = g_state.vs;
 +        g_pushed_arrays = false;  // the draw below, as the library's own
++        LOG_FIRST(1, "d3d: the first draw from vertex arrays the title pushed itself");
 +        UsePushedArrays();
++        g_last_draw_gen = ~0ull;  // its streams and shader aren't the state's count: never D3D12's repeat path
 +        BackendDraw(prim, start, count, indices);
++        g_last_draw_gen = ~0ull;  // nor the draw after it
 +        g_pushed_arrays = true;
 +        g_state.streams = streams;
 +        g_state.vs = bound;
@@ -765,7 +1056,7 @@ diff -ruN a/sdk/runtime/xdk/d3d8.cpp b/sdk/runtime/xdk/d3d8.cpp
      if (RenderThread()) {
          g_backend->Draw(g_state, prim, start, count, indices);
          return;
-@@ -1356,6 +1607,7 @@
+@@ -1356,6 +1611,7 @@
  
  void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride) {
      if (!g_backend || !count || !stride) return;
@@ -773,7 +1064,7 @@ diff -ruN a/sdk/runtime/xdk/d3d8.cpp b/sdk/runtime/xdk/d3d8.cpp
      if (uint64_t(count) * stride > kUpHalf) {  // more than the ring holds: not drawn, rather than from stale bytes
          LOG_FIRST(4, "d3d: DrawVerticesUP of %u bytes skipped (more than %u)", count * stride, kUpHalf);
          return;
-@@ -1730,9 +1982,11 @@
+@@ -1730,9 +1986,11 @@
              } else if (m >= kArrayFormat && m < kArrayFormat + 16 * 4) {
                  formats[(m - kArrayFormat) / 4] = v;
                  own_formats = true;
@@ -785,7 +1076,7 @@ diff -ruN a/sdk/runtime/xdk/d3d8.cpp b/sdk/runtime/xdk/d3d8.cpp
              } else if (v) {
                  prim = v;
                  vertices.clear();
-diff -ruN a/sdk/runtime/xdk/dsound.cpp b/sdk/runtime/xdk/dsound.cpp
+diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/dsound.cpp /home/claude/tsfp/port/sdk/runtime/xdk/dsound.cpp
 --- a/sdk/runtime/xdk/dsound.cpp	2026-11-10 01:22:43.410157508 -0300
 +++ b/sdk/runtime/xdk/dsound.cpp	2026-11-09 23:51:35.887004089 -0300
 @@ -88,6 +88,10 @@
@@ -855,7 +1146,7 @@ diff -ruN a/sdk/runtime/xdk/dsound.cpp b/sdk/runtime/xdk/dsound.cpp
  BUFFER(SetPitch, 2) {
      v.freq = PitchToHz(a[1]);
      return 0;
-diff -ruN a/sdk/runtime/xdk/xapi.cpp b/sdk/runtime/xdk/xapi.cpp
+diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/xapi.cpp /home/claude/tsfp/port/sdk/runtime/xdk/xapi.cpp
 --- a/sdk/runtime/xdk/xapi.cpp	2026-11-10 01:22:43.410406238 -0300
 +++ b/sdk/runtime/xdk/xapi.cpp	2026-11-08 20:22:22.000000000 -0300
 @@ -155,6 +155,28 @@
@@ -887,7 +1178,7 @@ diff -ruN a/sdk/runtime/xdk/xapi.cpp b/sdk/runtime/xdk/xapi.cpp
  HLE_STDCALL(XInputGetState, 2) {
      uint32_t port;
      {
-diff -ruN a/sdk/xdk/4721/layout.toml b/sdk/xdk/4721/layout.toml
+diff -ruN -x '*.o' -x __pycache__ sdk/xdk/4721/layout.toml /home/claude/tsfp/port/sdk/xdk/4721/layout.toml
 --- a/sdk/xdk/4721/layout.toml	1969-12-31 21:00:00.000000000 -0300
 +++ b/sdk/xdk/4721/layout.toml	2026-11-08 20:06:11.000000000 -0300
 @@ -0,0 +1,70 @@

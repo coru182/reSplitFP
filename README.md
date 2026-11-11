@@ -32,9 +32,9 @@
 > Please don't use this project with pirated copies of the game.
 
 > [!NOTE]
-> **A first test build.** 0.1.0 has been played in a test harness only, through the menus, a profile and the first
-> story level; it has not run on a console yet. Expect rough edges, and please [report](#reporting-a-problem) what
-> you find.
+> **A test build.** It has been played in a test harness through the menus, a profile and the first story level,
+> and on a console as far as the logo films so far. Expect rough edges, and please [report](#reporting-a-problem)
+> what you find.
 
 ## What it is
 

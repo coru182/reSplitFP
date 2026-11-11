@@ -1,4 +1,4 @@
-reSplitFP 0.1.0 - TimeSplitters: Future Perfect (US Xbox), recompiled for the PS5
+reSplitFP 0.1.1 - TimeSplitters: Future Perfect (US Xbox), recompiled for the PS5
 =================================================================================
 
 A first test build. An unofficial fan port: the original Xbox game's code, statically recompiled into a native PS5
@@ -47,8 +47,8 @@ users on the PS5 (guests are enough) and turn on their controllers.
 
 The game runs in its own widescreen mode, full screen at 16:9.
 
-Not yet in this build: the logo videos at the start play their sound over a black screen, the game's buttons and
-text are still the Xbox's, and the online modes (Xbox Live) are not there.
+Not yet in this build: the game's buttons and text are still the Xbox's, and the online modes (Xbox Live) are not
+there.
 
 In-game menu
 ------------

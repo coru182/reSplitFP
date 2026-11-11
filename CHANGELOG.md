@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.1
+
+- **The first start no longer says there is no room.** Once the disc image was unpacked, the app checked the folder
+  for TimeSplitters 2's files instead of this game's, called the unpacked game incomplete, and played from the .iso
+  (unpacking again at every start). An unpacked `/data/tsfp/game/` is now found and used.
+- **The picture after the logo films.** Each frame cleared the screen to black and then drew the game over it, with
+  nothing between the two to keep them in that order; a PS5's GPU may run them the other way round, leaving black.
+  The clear now finishes first, and a picture that fills the screen isn't cleared at all.
+- **A black or frozen screen now says why in the log.** When no frame has been shown for 5 seconds the log names
+  what the renderer is waiting on (the GPU, the screen) or that the game itself stopped presenting.
+- Two Vulkan images made with the uses their views and layouts need (found by Vulkan's validation layers).
+
 ## 0.1.0
 
 The first test build: TimeSplitters: Future Perfect (US Xbox) statically recompiled into a native PS5 app.

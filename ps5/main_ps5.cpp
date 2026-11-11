@@ -73,10 +73,10 @@ std::filesystem::path Child(const std::filesystem::path& dir, const char* name) 
     return {};
 }
 
-// the game's files: default.xbe and its Data folder
+// the game's files: default.xbe and its pak folder (Future Perfect's levels, sounds and text)
 bool Unpacked(const std::filesystem::path& dir) {
     std::error_code ec;
-    auto xbe = Child(dir, IMAGE_XBE), d = Child(dir, "Data");
+    auto xbe = Child(dir, IMAGE_XBE), d = Child(dir, "pak");
     return !xbe.empty() && std::filesystem::is_regular_file(xbe, ec) && !d.empty() &&
            std::filesystem::is_directory(d, ec);
 }

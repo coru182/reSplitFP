@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.2
+
+- **Past the logo films: the black screen.** After the films the game starts a thread that draws its loading
+  screen. On the console that thread never ran, and the game waited for it on a black screen (0.1.1's log: "the game
+  has stopped presenting"). Every game and system thread was given a 64 MB stack; a PS5 title's thread stacks come
+  out of its own few hundred MB of memory, and the sixth stack didn't fit. Stacks are 16 MB on the PS5 now (the game
+  plays its first level in the test harness with 2 MB), a failed thread is retried with a smaller one, and a thread
+  that still can't be made is written to the log instead of vanishing.
+
 ## 0.1.1
 
 - **The first start no longer says there is no room.** Once the disc image was unpacked, the app checked the folder

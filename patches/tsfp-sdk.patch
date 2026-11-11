@@ -664,6 +664,61 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/gpu/vk_loader.h /home/claude/tsfp/
  
  #define GPU_VK_DECLARE(name) extern PFN_##name name;
  GPU_VK_GLOBAL(GPU_VK_DECLARE)
+diff -ruN -x '*.o' -x __pycache__ sdk/runtime/kernel/threads.cpp /home/claude/tsfp/port/sdk/runtime/kernel/threads.cpp
+--- a/sdk/runtime/kernel/threads.cpp	2026-11-10 01:22:43.425732306 -0300
++++ b/sdk/runtime/kernel/threads.cpp	2026-11-10 23:02:13.401132564 -0300
+@@ -137,18 +137,40 @@
+     HANDLE h = ::CreateThread(nullptr, 64u << 20, entry, f, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+     if (h) ::CloseHandle(h);
+ #else
+-    pthread_attr_t attr;
+-    pthread_attr_init(&attr);
+-    pthread_attr_setstacksize(&attr, 64u << 20);
++    // 64 MB as on Windows. A PS5 title's thread stacks come out of its flexible memory, a few hundred MB for
++    // everything: five 64 MB stacks (the game's threads, vertical blank, sound, DPCs) left none for Future Perfect's
++    // loading screen thread, which then never ran and the game waited for it on a black screen. 16 MB there, as
++    // reUndr's game thread; the deepest guest call chains use a small part of it. XBE_THREAD_STACK_MB (testing)
++    // sets the size; a smaller one is tried when the system can't give it.
++#ifdef __PROSPERO__
++    size_t stack = 16u << 20;
++#else
++    size_t stack = 64u << 20;
++#endif
++    if (const char* e = std::getenv("XBE_THREAD_STACK_MB")) stack = size_t(std::max(1, std::atoi(e))) << 20;
+     pthread_t th;
+-    pthread_create(&th, &attr, [](void* p) -> void* {
+-        ApplyAffinity();
+-        std::unique_ptr<std::function<void()>> g(static_cast<std::function<void()>*>(p));
+-        (*g)();
+-        return nullptr;
+-    }, f);
+-    pthread_detach(th);
+-    pthread_attr_destroy(&attr);
++    int rc = -1;
++    for (;;) {
++        pthread_attr_t attr;
++        pthread_attr_init(&attr);
++        pthread_attr_setstacksize(&attr, stack);
++        rc = pthread_create(&th, &attr, [](void* p) -> void* {
++            ApplyAffinity();
++            std::unique_ptr<std::function<void()>> g(static_cast<std::function<void()>*>(p));
++            (*g)();
++            return nullptr;
++        }, f);
++        pthread_attr_destroy(&attr);
++        if (rc == 0 || stack <= (1u << 20)) break;
++        LOGE("threads: no host thread with a %zu MB stack (error %d), trying %zu MB", stack >> 20, rc, stack >> 21);
++        stack /= 2;
++    }
++    if (rc == 0) {
++        pthread_detach(th);
++    } else {
++        LOGE("threads: no host thread could be made (error %d): a thread of the game will not run", rc);
++        delete f;
++    }
+ #endif
+ }
+ 
 diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/port/sdk/runtime/xdk/d3d8.cpp
 --- a/sdk/runtime/xdk/d3d8.cpp	2026-11-10 01:22:43.409724643 -0300
 +++ b/sdk/runtime/xdk/d3d8.cpp	2026-11-10 22:09:01.956434578 -0300

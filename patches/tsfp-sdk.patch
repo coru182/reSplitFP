@@ -721,7 +721,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/kernel/threads.cpp /home/claude/ts
  
 diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/port/sdk/runtime/xdk/d3d8.cpp
 --- a/sdk/runtime/xdk/d3d8.cpp	2026-11-10 01:22:43.409724643 -0300
-+++ b/sdk/runtime/xdk/d3d8.cpp	2026-11-10 22:09:01.956434578 -0300
++++ b/sdk/runtime/xdk/d3d8.cpp	2026-11-11 00:06:39.665855169 -0300
 @@ -72,6 +72,14 @@
  #define SYM_D3DDevice_EndPush FFFFFE01
  #define HAS_D3DDevice_EndPush 0
@@ -737,7 +737,70 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
  // The Third Age (LTCG): its inlined library code reads the current vertex shader object at a device field
  // (D3D_DeviceVertexShaderField, +0x794) that the console's CreateDevice points at a default shader
  // (D3D_DefaultVertexShader, 0x2397F0). The host's CreateDevice clears the device, so it sets the same pointer.
-@@ -195,6 +203,13 @@
+@@ -143,13 +151,56 @@
+ std::recursive_mutex g_lock;
+ 
+ std::unordered_map<uint32_t, std::shared_ptr<gpu::VertexShader>> g_vs;
+-// vertex program memory, see D3DDevice_LoadVertexShader
+-struct LoadedProgram {
+-    std::vector<uint32_t> program;  // 4 dwords per instruction, from the address to the program's end
+-    uint32_t type = 0;
+-};
+-std::map<uint32_t, LoadedProgram> g_vs_memory;  // by start address
++// Vertex program memory: the GPU's 136 instruction slots, four dwords each, as LoadVertexShader,
++// LoadVertexShaderProgram and the title's own commands (SET_TRANSFORM_PROGRAM_LOAD 0x1E9C, then the words to
++// 0x0B00..0x0B7C) fill them. A selected program runs from its slot to its last instruction (bit 0 of the fourth
++// dword). Future Perfect builds its skinning programs in pieces: a long one at 0, the end of it overwritten by small
++// fragments loaded after it (lighting); kept as whole programs, the first fragment took the long one away and the
++// hands in first person were drawn with no program at all.
++constexpr uint32_t kProgramSlots = 136;
++std::array<uint32_t, kProgramSlots * 4> g_vsp_image{};
++std::array<uint32_t, kProgramSlots> g_vsp_type{};    // a slot's program type, 0 never loaded
++std::array<uint32_t, kProgramSlots * 4> g_vsp_stage{};  // the title's own words, until CommitPrograms
++uint32_t g_vsp_load = 0;                             // the dword the next of them fills
++uint32_t g_vsp_lo = ~0u, g_vsp_hi = 0;               // the slots they wrote since the last commit
+ std::map<std::pair<uint32_t, uint32_t>, std::shared_ptr<gpu::VertexShader>> g_vs_selected;  // (declaration, address)
++
++// selections that read slots lo..hi-1 are made again
++void ForgetSelections(uint32_t lo, uint32_t hi) {
++    for (auto sel = g_vs_selected.begin(); sel != g_vs_selected.end();) {
++        uint32_t at = sel->first.second, n = std::max<uint32_t>(uint32_t(sel->second->program.size() / 4), 1);
++        sel = at < hi && lo < at + n ? g_vs_selected.erase(sel) : std::next(sel);
++    }
++}
++// n instructions into the slots from at (a program loaded again unchanged changes nothing)
++void WriteProgram(uint32_t at, const uint32_t* words, uint32_t n, uint32_t type) {
++    if (at >= kProgramSlots) return;
++    n = std::min(n, kProgramSlots - at);
++    bool changed = false;
++    for (uint32_t i = 0; i < n && !changed; i++)
++        changed = g_vsp_type[at + i] != type || std::memcmp(&g_vsp_image[(at + i) * 4], words + i * 4, 16) != 0;
++    if (!changed) return;
++    for (uint32_t i = 0; i < n * 4; i++) g_vsp_image[at * 4 + i] = g_vsp_stage[at * 4 + i] = words[i];
++    for (uint32_t i = 0; i < n; i++) g_vsp_type[at + i] = type;
++    ForgetSelections(at, at + n);
++}
++void ProgramWord(uint32_t v) {
++    if (g_vsp_load < g_vsp_stage.size()) {
++        g_vsp_stage[g_vsp_load] = v;
++        g_vsp_lo = std::min(g_vsp_lo, g_vsp_load / 4);
++        g_vsp_hi = std::max(g_vsp_hi, g_vsp_load / 4 + 1);
++    }
++    g_vsp_load++;
++}
++void CommitPrograms() {
++    if (g_vsp_lo >= g_vsp_hi) return;
++    uint32_t at = g_vsp_lo, n = g_vsp_hi - g_vsp_lo;
++    g_vsp_lo = ~0u;
++    g_vsp_hi = 0;
++    std::vector<uint32_t> words(g_vsp_stage.begin() + at * 4, g_vsp_stage.begin() + (at + n) * 4);
++    WriteProgram(at, words.data(), n, 0x2078);
++    LOG_FIRST(4, "d3d: a vertex program the title uploaded itself, at %u, %u instructions", at, n);
++}
+ std::unordered_map<uint32_t, std::shared_ptr<gpu::PixelShader>> g_ps;
+ std::array<uint32_t, 3> g_buffers{};  // front, back surfaces
+ uint32_t g_buffer_count = 2;
+@@ -195,6 +246,13 @@
  
  void Walk(uint32_t end);
  
@@ -751,7 +814,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
  // Hardware commands a caller still pushes go to a scratch buffer, rewound at every request once Walk has read it
  uint32_t ScratchPush(uint32_t bytes = 0) {
      Walk(Dev(kDevPush));
-@@ -426,8 +441,8 @@
+@@ -426,8 +484,8 @@
      uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24), interval = R32(pp + 0x30);
      if (!w) w = 640;
      if (!h) h = 480;
@@ -762,7 +825,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
      // XBE_VULKAN_PROBE: what this PC's Vulkan offers, in the log (the Vulkan backend is being written)
      if (std::getenv("XBE_VULKAN_PROBE")) gpu::vk::Probe();
      std::memset(HostPtr(kDevice), 0, XDK_CDevice_Size);
-@@ -489,6 +504,10 @@
+@@ -489,6 +547,10 @@
                                           L"game needs. Updating the graphics driver may help; the log has the details.");
          if (RenderThread()) g_backend = gpu::CreateThreadedBackend(std::move(g_backend));
      }
@@ -773,7 +836,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
      g_state = gpu::State{};
      g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
      g_screen_pixels = w * h;
-@@ -628,7 +647,94 @@
+@@ -628,7 +690,94 @@
  }
  HLE_STDCALL(D3DDevice_SetFlickerFilter, 1) { return 0; }
  HLE_STDCALL(D3DDevice_SetSoftDisplayFilter, 1) { return 0; }
@@ -869,7 +932,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
  // the front buffer, read back at the guest size, is kept for the next instance after a quick reboot, which may
  // fade from it at its first frames
  HLE_STDCALL(D3DDevice_PersistDisplay, 0) {
-@@ -708,6 +814,15 @@
+@@ -708,6 +857,15 @@
  }  // namespace
  
  HLE_STDCALL(D3DDevice_Swap, 1) {
@@ -885,7 +948,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
      kernel::Blocking told;  // the game told on its own thread, before and after (kernel::g_blocking)
      app::SplashFirstFrame();
      // handed over from the previous instance: the window opens on the second frame, the first picture with
-@@ -732,6 +847,7 @@
+@@ -732,6 +890,7 @@
          }
      }
      kernel::MarkFrameThread();
@@ -893,7 +956,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
      if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
      app::Pace();
      // the in-game menu or a pause in the background: the game waits here, its last picture shown again with the
-@@ -981,6 +1097,7 @@
+@@ -981,6 +1140,7 @@
  HLE_STDCALL(D3DDevice_SetStreamSource, 3) {
      if (core::t_draw_thread) --core::g_state_gen;  // draw data or a query: not a change of draw state
      DeviceLock lock;
@@ -901,7 +964,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
      uint32_t n = a[0] & 15, vb = a[1], stride = a[2];
      uint32_t old = R32(kStreams + n * kStreamSize + XDK_Stream_Buffer);
      AddRef(ctx, vb);
-@@ -1065,6 +1182,7 @@
+@@ -1065,6 +1225,7 @@
  
  HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
      DeviceLock lock;
@@ -909,15 +972,58 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
      uint32_t h = a[0];
      g_state.vs_handle = h;
      g_state.vs = nullptr;
-@@ -1117,6 +1235,7 @@
+@@ -1117,6 +1278,9 @@
  namespace {
  
  void SelectVertexShader(uint32_t h, uint32_t address) {
 +    g_pushed_arrays = false;
++    Walk(Dev(kDevPush));  // a program the library uploaded with its own commands just before
++    CommitPrograms();
      std::shared_ptr<gpu::VertexShader> decl;
      if (h & 1) {
          auto it = g_vs.find(h);
-@@ -1179,6 +1298,61 @@
+@@ -1131,19 +1295,15 @@
+     auto key = std::make_pair(decl->handle, address);
+     auto sit = g_vs_selected.find(key);
+     if (sit == g_vs_selected.end()) {
+-        // the program loaded at the address, or the tail of one loaded below it
+-        const LoadedProgram* lp = nullptr;
+-        uint32_t skip = 0;
+-        for (auto& [at, p] : g_vs_memory)
+-            if (at <= address && address < at + p.program.size() / 4) {
+-                lp = &p;
+-                skip = address - at;
+-            }
++        // from the slot to the program's last instruction
+         auto vs = std::make_shared<gpu::VertexShader>(*decl);
+         vs->hash = 0;
+-        if (lp) {
+-            vs->program.assign(lp->program.begin() + skip * 4, lp->program.end());
+-            vs->program_type = lp->type;
++        if (address < kProgramSlots && g_vsp_type[address]) {
++            uint32_t end = address;
++            while (end < kProgramSlots && g_vsp_type[end] && !(g_vsp_image[end * 4 + 3] & 1)) end++;
++            if (end < kProgramSlots && g_vsp_type[end]) end++;  // the last instruction
++            vs->program.assign(g_vsp_image.begin() + address * 4, g_vsp_image.begin() + end * 4);
++            vs->program_type = g_vsp_type[address];
+         } else {
+             LOG_FIRST(8, "d3d: SelectVertexShader %08X at %u: nothing loaded there", h, address);
+         }
+@@ -1165,12 +1325,7 @@
+         return 0;
+     }
+     uint32_t address = a[1], n = uint32_t(it->second->program.size() / 4);
+-    // programs the new one overwrites go, and every selection made from that memory
+-    for (auto m = g_vs_memory.begin(); m != g_vs_memory.end();)
+-        m = m->first < address + n && address < m->first + m->second.program.size() / 4 ? g_vs_memory.erase(m) : std::next(m);
+-    g_vs_memory[address] = {it->second->program, it->second->program_type};
+-    for (auto sel = g_vs_selected.begin(); sel != g_vs_selected.end();)
+-        sel = sel->first.second >= address && sel->first.second < address + n ? g_vs_selected.erase(sel) : std::next(sel);
++    WriteProgram(address, it->second->program.data(), n, it->second->program_type);
+     LOG_FIRST(16, "d3d: LoadVertexShader %08X at %u, %u instructions", a[0], address, n);
+     return 0;
+ }
+@@ -1179,6 +1334,57 @@
      SelectVertexShader(a[0], a[1]);
      return 0;
  }
@@ -932,11 +1038,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
 +    uint32_t hdr = R32(func), n = hdr >> 16;
 +    std::vector<uint32_t> program(size_t(n) * 4);
 +    for (uint32_t i = 0; i < n * 4; i++) program[i] = R32(func + 4 + i * 4);
-+    for (auto m = g_vs_memory.begin(); m != g_vs_memory.end();)
-+        m = m->first < address + n && address < m->first + m->second.program.size() / 4 ? g_vs_memory.erase(m) : std::next(m);
-+    g_vs_memory[address] = {std::move(program), hdr & 0xFFFF};
-+    for (auto sel = g_vs_selected.begin(); sel != g_vs_selected.end();)
-+        sel = sel->first.second >= address && sel->first.second < address + n ? g_vs_selected.erase(sel) : std::next(sel);
++    WriteProgram(address, program.data(), n, hdr & 0xFFFF);
 +    LOG_FIRST(16, "d3d: LoadVertexShaderProgram %08X at %u, %u instructions", func, address, n);
 +    return 0;
 +}
@@ -979,7 +1081,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
  HLE_STDCALL(D3DDevice_SetShaderConstantMode, 1) {
      DeviceLock lock;
      g_own_constants = a[0] & 0x10;  // D3DSCM_NORESERVEDCONSTANTS
-@@ -1186,6 +1360,8 @@
+@@ -1186,6 +1392,8 @@
      return 0;
  }
  
@@ -988,7 +1090,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
  HLE_STDCALL(D3DDevice_CreatePixelShader, 2) {
      DeviceLock lock;
      auto ps = std::make_shared<gpu::PixelShader>();
-@@ -1225,7 +1401,33 @@
+@@ -1225,7 +1433,33 @@
          LOG_FIRST(8, "d3d: SetPixelShader with unknown handle %08X", a[0]);
          return 0;
      }
@@ -1023,7 +1125,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
      const uint32_t* d = g_state.ps->def;
      auto put = [&](uint32_t method, uint32_t v) { g_state.simple[method >> 2] = v; };
      for (int i = 0; i < 8; i++) {
-@@ -1245,7 +1447,6 @@
+@@ -1245,7 +1479,6 @@
      put(gpu::kMPsDotMapping, d[55]);
      put(gpu::kMPsInputTexture, d[56]);
      SetComplex(gpu::kRsPsTextureModes, d[54]);
@@ -1031,7 +1133,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
  }
  
  HLE_STDCALL(D3DDevice_SetPixelShaderConstant, 3) {
-@@ -1263,6 +1464,7 @@
+@@ -1263,6 +1496,7 @@
  // visible, with D3DERR_TESTINCOMPLETE, so a flare or glow fades in rather than flashing on.
  HLE_STDCALL(D3DDevice_BeginVisibilityTest, 0) {
      DeviceLock lock;
@@ -1039,7 +1141,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
      SyncDeferred();
      if (g_backend) g_backend->BeginQuery();
      return 0;
-@@ -1282,7 +1484,8 @@
+@@ -1282,7 +1516,8 @@
          // a backend without queries: everything visible, as before tests were counted
          done = g_backend && g_backend->QueryResult(a[0], pixels);
          if (!g_backend || !g_backend->Queries()) {
@@ -1049,7 +1151,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
              done = true;
          }
      }
-@@ -1297,8 +1500,60 @@
+@@ -1297,8 +1532,60 @@
  // every draw goes to the backend through here: whether the state is the draw before's (gpu::g_draw_same_state, for
  // D3D12's repeat path), on this thread; the threaded renderer works that out itself
  uint64_t g_last_draw_gen = ~0ull;
@@ -1111,7 +1213,7 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
      if (RenderThread()) {
          g_backend->Draw(g_state, prim, start, count, indices);
          return;
-@@ -1356,6 +1611,7 @@
+@@ -1356,6 +1643,7 @@
  
  void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride) {
      if (!g_backend || !count || !stride) return;
@@ -1119,7 +1221,53 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
      if (uint64_t(count) * stride > kUpHalf) {  // more than the ring holds: not drawn, rather than from stale bytes
          LOG_FIRST(4, "d3d: DrawVerticesUP of %u bytes skipped (more than %u)", count * stride, kUpHalf);
          return;
-@@ -1730,9 +1986,11 @@
+@@ -1550,6 +1838,11 @@
+             p += n * 4;
+             continue;
+         }
++        if (method >= 0x0B00 && method < 0x0B80 && ((head & 0x40000000) || method + n * 4 <= 0x0B80)) {  // a program
++            for (uint32_t i = 0; i < n; i++) ProgramWord(R32(p + i * 4));
++            p += n * 4;
++            continue;
++        }
+         if (method >= 0x0B80 && method < 0x0C00 && ((head & 0x40000000) || method + n * 4 <= 0x0C00)) {  // constants
+             constexpr uint32_t kSlots = sizeof(g_state.vsc) / 4;
+             if (g_vsc_load < kSlots) {
+@@ -1601,6 +1894,12 @@
+                 if (g_vsc_load / 4 < 192) std::memcpy(&g_state.vsc[g_vsc_load / 4][g_vsc_load % 4], &v, 4);
+                 g_vsc_load++;
+                 continue;
++            } else if (m == 0x1E9C) {  // the program slot the next program words load
++                g_vsp_load = v * 4;
++                continue;
++            } else if (m >= 0x0B00 && m < 0x0B80) {  // program words
++                ProgramWord(v);
++                continue;
+             } else if (m >= 0x1880 && m < 0x1900) {  // 2 floats, z = 0 and w = 1
+                 a += (m - 0x1880) / 8 * 4;
+                 last = (m - 0x1880) / 4 & 1;
+@@ -1637,6 +1936,7 @@
+         }
+     }
+     g_walk = end;
++    CommitPrograms();
+ }
+ }  // namespace
+ }  // namespace d3d
+@@ -1727,12 +2027,24 @@
+             uint32_t m = head & 0x40000000 ? method : method + i * 4, v = R32(p);
+             if (m == kInlineArray) {
+                 if (prim) vertices.push_back(v);
++            } else if (m == 0x1E9C) {  // SET_TRANSFORM_PROGRAM_LOAD: the program slot the next words fill
++                g_vsp_load = v * 4;
++            } else if (m >= 0x0B00 && m < 0x0B80) {  // program words
++                ProgramWord(v);
++            } else if (m == 0x1EA4) {  // SET_TRANSFORM_CONSTANT_LOAD: the constant the next values fill
++                g_vsc_load = v * 4;
++            } else if (m >= 0x0B80 && m < 0x0C00) {  // constant values, four a constant, the load moving on (Walk)
++                if (g_vsc_load / 4 < 192) std::memcpy(&g_state.vsc[g_vsc_load / 4][g_vsc_load % 4], &v, 4);
++                g_vsc_load++;
++                ++core::g_state_gen;
              } else if (m >= kArrayFormat && m < kArrayFormat + 16 * 4) {
                  formats[(m - kArrayFormat) / 4] = v;
                  own_formats = true;
@@ -1131,6 +1279,14 @@ diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/d3d8.cpp /home/claude/tsfp/por
              } else if (v) {
                  prim = v;
                  vertices.clear();
+@@ -1747,6 +2059,7 @@
+             }
+         }
+     }
++    CommitPrograms();
+     g_push_begin = 0;
+     ScratchPush();
+     return a[0];
 diff -ruN -x '*.o' -x __pycache__ sdk/runtime/xdk/dsound.cpp /home/claude/tsfp/port/sdk/runtime/xdk/dsound.cpp
 --- a/sdk/runtime/xdk/dsound.cpp	2026-11-10 01:22:43.410157508 -0300
 +++ b/sdk/runtime/xdk/dsound.cpp	2026-11-09 23:51:35.887004089 -0300

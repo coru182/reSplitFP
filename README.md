@@ -32,9 +32,8 @@
 > Please don't use this project with pirated copies of the game.
 
 > [!NOTE]
-> **A test build.** It has been played in a test harness through the menus, a profile and the first story level,
-> and on a console as far as the logo films so far. Expect rough edges, and please [report](#reporting-a-problem)
-> what you find.
+> **A test build.** It has been played on a console into co-op Story, and in a test harness through the menus, a
+> profile and the first story level. Expect rough edges, and please [report](#reporting-a-problem) what you find.
 
 ## What it is
 
@@ -51,9 +50,11 @@ services.
   output at 3840x2160.
 - **The game's own speed** on any TV, 120 Hz ones included.
 - **Up to four players** in split screen, with DualSense controllers.
+- **PlayStation buttons** in the menus, prompts and tips, a PlayStation controller in Controls, and the PS5 named in
+  the game's text.
 - **Install it like reSplit2:** the first start unpacks your disc image; from then on the game starts straight away.
 
-Not yet: PlayStation buttons and "PS5" in the game's text (as reSplit2 has), and the online modes (Xbox Live).
+Not yet: the online modes (Xbox Live).
 
 ## Requirements
 

@@ -1,5 +1,9 @@
 #include "app/app.h"
 
+namespace tsfp {
+void Loaded();  // game/tsfp_ps5.cpp
+}
+
 // what the runtime asks of the game; strings must be set, hooks may stay null
 const app::GameInfo app::kGame = {
     .title = L"TimeSplitters: Future Perfect",  // window and splash
@@ -14,7 +18,7 @@ const app::GameInfo app::kGame = {
     .load = nullptr,
     .save = nullptr,
     .init = nullptr,
-    .loaded = nullptr,
+    .loaded = tsfp::Loaded,                // image in memory, before its entry point: the PS5 in its text and buttons
     .window = nullptr,
     .message = nullptr,
     .ui = nullptr,

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.3
+
+- **PlayStation buttons.** The game's Xbox buttons are drawn as PlayStation ones everywhere it shows them (menus,
+  prompts, the weapon tips): A as Cross, B Circle, X Square, Y Triangle, White L1, Black R1, the triggers L2 and R2,
+  and Start and Back as Options and the touch pad. reSplitFP's own drawings (tools/mkbuttons.py, game/art).
+- **A PlayStation controller in Controls.** The Controls menu's picture of the Xbox controller, and the glow behind
+  it, are a white PlayStation-style controller. Your own picture can go in its place for your own builds
+  (`python3 tools/mkbuttons.py --image your-controller.png`; it stays out of the repository).
+- **The PS5 in the game's text.** "Xbox Hard Disk" is "PS5 Storage", thumbsticks are sticks, the triggers L2 / R2,
+  and the console is named a PS5, in every language the game carries. The text is in the front end's level file;
+  it is served from memory rewritten, the game's files are never changed.
+- **Models drawn with no program.** Future Perfect builds some of its vertex programs in pieces: a long one at the
+  start of the GPU's program memory, its end then overwritten by small fragments. Program memory was kept as whole
+  programs, so the first fragment took the long one away and those models were drawn with nothing (the log's
+  "nothing loaded there"). It is now kept as the GPU's 136 instruction slots, a program running from its slot to its
+  last instruction. Program uploads the library makes with its own GPU commands are taken too.
+
 ## 0.1.2
 
 - **Past the logo films: the black screen.** After the films the game starts a thread that draws its loading

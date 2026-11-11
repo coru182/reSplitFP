@@ -17,7 +17,7 @@ VK=$REUNDR/build/deps/PS5_Vulkan
 SDK=$VK/.deps/native/ps5-payload-sdk
 OUT=$ROOT/build-ps5
 TITLE=PPSA99065
-VERSION=0.1.2
+VERSION=0.1.3
 JOBS=${JOBS:-$(nproc)}
 export PATH=/usr/lib/llvm-18/bin:$PATH
 CXX="$SDK/bin/prospero-clang++"
@@ -56,6 +56,9 @@ if has compile; then
         o="$OUT/gen/$(basename {} .cpp).o"; [ "$o" -nt {} ] && exit 0
         $CXX -std=c++20 -O2 -g0 -w -fno-strict-aliasing -ffunction-sections -fdata-sections -fno-plt -femulated-tls \
             -I"$GAME/sdk/runtime" -I"$GAME/generated/game" -c {} -o "$o.tmp" && mv "$o.tmp" "$o" && echo "gen $(basename {})" || { echo "FAIL {}"; exit 255; }'
+    # the PlayStation buttons and controller built in: game/art's drawings, or your own controller picture when
+    # art/pad.png is there (tools/mkbuttons.py --image)
+    python3 "$ROOT/tools/mkbuttons.py" --embed "$GAME/src/game/tsfp_button_art.cpp"
     # the host: the runtime without its Windows parts (app/, SDL input, Direct3D 12, XAudio2, the DLL upscalers),
     # the port's own code, ImGui, and the PS5 host
     SRC=$(ls "$GAME"/sdk/runtime/*/*.cpp | grep -Ev "/runtime/app/|/core/input.cpp|/gpu/d3d12.cpp|/gpu/upscale.cpp|/audio/xaudio2.cpp")

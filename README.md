@@ -32,8 +32,9 @@
 > Please don't use this project with pirated copies of the game.
 
 > [!NOTE]
-> **A test build.** It has been played on a console into co-op Story, and in a test harness through the menus, a
-> profile and the first story level. Expect rough edges, and please [report](#reporting-a-problem) what you find.
+> **A test build.** It has been played on a console in co-op Story, and in a test harness through the menus, a
+> profile and the first story level in one and two player modes. Expect rough edges, and please
+> [report](#reporting-a-problem) what you find.
 
 ## What it is
 
@@ -49,6 +50,7 @@ services.
 - **Widescreen at 4K.** The game's own widescreen mode, full screen at 16:9, rendered at 1080p, 1620p or 4K and
   output at 3840x2160.
 - **The game's own speed** on any TV, 120 Hz ones included.
+- **L2 aims, R2 fires**, as shooters on the PS5 do (a setting turns it back to the Xbox layout).
 - **Up to four players** in split screen, with DualSense controllers.
 - **PlayStation buttons** in the menus, prompts and tips, a PlayStation controller in Controls, and the PS5 named in
   the game's text.
